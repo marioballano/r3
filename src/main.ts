@@ -404,7 +404,7 @@ class App {
     this.sel = fi;
     this.hud.setView('CONSTELLATION // CALL GRAPH');
     this.hud.setDepth(null);
-    this.hud.caption(`// ${this.model.fns[fi].name}`, 'callers above · callees below · imports on the amber ring · click to re-centre');
+    this.hud.caption(`// ${this.model.fns[fi].name}`, 'callers above · address-takers violet · callees below · imports amber · click to re-centre');
     this.inspector.show(fi);
     this.setSeekUi(this.model.fns[fi].addr);
     this.syncR2(this.model.fns[fi].addr);
@@ -545,7 +545,7 @@ class App {
       }
       return `<div class="n">${esc(f.name)}</div><div class="a">${hex(f.min)} – ${hex(f.max)}</div>
         <div><span class="k">size</span> <span class="v">${f.size}</span> <span class="k">blocks</span> <span class="v">${f.nbbs}</span> <span class="k">cc</span> <span class="v">${f.cc}</span></div>
-        <div><span class="k">▲ callers</span> <span class="v">${m.callers(p.fi).length}</span> <span class="k">▼ callees</span> <span class="v">${m.callees(p.fi).length}</span> <span class="k">strings</span> <span class="v">${m.strOut[p.fi].length}</span></div>
+        <div><span class="k">▲ callers</span> <span class="v">${m.callers(p.fi).length}</span> <span class="k">▼ callees</span> <span class="v">${m.callees(p.fi).length}</span> <span class="k">strings</span> <span class="v">${m.strOut[p.fi].length}</span>${m.refIn[p.fi].length ? ` <span class="k">&amp; taken by</span> <span class="v">${m.referrers(p.fi).length}</span>` : ''}</div>
         ${near}<div class="hint">click focus · dbl-click core · C graph</div>`;
     }
     if (p.kind === 'sat') {

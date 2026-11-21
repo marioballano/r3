@@ -344,6 +344,11 @@ export class World {
       states.set(ti, n.hop === 0 ? 2 : n.hop === 1 ? 0.55 : 0.2);
       if (n.hop > 0) roles.set(ti, n.role === 'caller' ? 1 : n.role === 'callee' ? 2 : 3);
     }
+    // referrers / referenced functions (address taken) stay lit, untinted
+    for (const g of [...m.referrers(fi), ...m.referenced(fi)]) {
+      const ti = city.byFn.get(g);
+      if (ti !== undefined && !states.has(ti)) states.set(ti, 0.35);
+    }
     city.setStates(states, roles);
     this.arcs?.setDim(1);
   }

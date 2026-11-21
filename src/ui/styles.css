@@ -327,3 +327,6 @@ body.ins-open .minimap { right: 512px; }
 .helpbox .ptitle { margin-bottom: 10px; }
 .helpbox .hint { color: #6b5d8c; font-size: 10px; margin-top: 10px; }
 .term { z-index: 3; }
+
+.xr-sec.ref .xr-title { color: #b48cff; }
+.xr-site.tail { color: #5dff9b; border-color: rgba(93, 255, 155, 0.4); }

@@ -99,6 +99,10 @@ export interface FunctionsMsg {
   calls: [number, number, number][];
   /** string references: [fnIdx, siteAddr, stringVaddr] */
   strRefs: [number, number, number][];
+  /** tail calls (jump into another function's entry): [fromIdx, toIdx, siteAddr] */
+  tails: [number, number, number][];
+  /** function address taken by code in another function: [fromIdx, toIdx, siteAddr] */
+  refs: [number, number, number][];
   /** flat [fnIdx, blockAddr, blockSize, …] */
   blocks: number[];
   seek: number | null;

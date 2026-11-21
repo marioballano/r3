@@ -50,6 +50,10 @@ export interface GraphOut {
   calls: [number, number, number][];
   /** [fnIdx, siteAddr, stringVaddr] */
   strRefs: [number, number, number][];
+  /** tail calls: a jump (CODE xref) into another function's entry: [fromIdx, toIdx, siteAddr] */
+  tails: [number, number, number][];
+  /** address taken: code in one function loads another function's entry (callbacks, tables): [fromIdx, toIdx, siteAddr] */
+  refs: [number, number, number][];
   /** flat [fnIdx, blockAddr, blockSize, …] — exact basic-block ownership */
   blocks: number[];
   /** how many xrefs could be attributed to a function via basic blocks vs bounds fallback */
@@ -164,8 +168,23 @@ export function buildGraph(afl: AflEntry[], blocks: { addr: number; size: number
 
   const calls: [number, number, number][] = [];
   const strRefs: [number, number, number][] = [];
+  const tails: [number, number, number][] = [];
+  const refs: [number, number, number][] = [];
   const seenCall = new Set<string>();
   for (const x of xrefs) {
+    if (x.type === 'CODE') {
+      const to = entryIdx.get(x.addr);
+      if (to === undefined) continue; // ordinary intra-function jump
+      const from = owner(x.from);
+      if (from >= 0 && from !== to) tails.push([from, to, x.from]);
+      continue;
+    }
+    if (x.type === 'DATA' && entryIdx.has(x.addr) && !stringAddrs.has(x.addr)) {
+      const to = entryIdx.get(x.addr)!;
+      const from = owner(x.from);
+      if (from >= 0 && from !== to) refs.push([from, to, x.from]);
+      continue;
+    }
     if (x.type === 'CALL') {
       const callee = entryIdx.get(x.addr);
       if (callee === undefined) continue; // call into the middle of something unknown
@@ -184,5 +203,5 @@ export function buildGraph(afl: AflEntry[], blocks: { addr: number; size: number
   calls.sort((a, b) => a[2] - b[2]);
   const flat: number[] = [];
   for (const iv of bbIv) flat.push(iv.fn, iv.start, iv.end - iv.start);
-  return { functions, calls, strRefs, blocks: flat, stats };
+  return { functions, calls, strRefs, tails, refs, blocks: flat, stats };
 }

@@ -465,6 +465,8 @@ export class Inspector {
       wrap.append(s);
       return s;
     };
+    const tailSites = new Set([...m.in[fi], ...m.out[fi]].filter((c) => c.kind === 'tail').map((c) => c.site));
+    const chip = (s: number) => (tailSites.has(s) ? `jmp ${hex(s, 0)}` : hex(s, 0));
     const callers = group(m.in[fi].map((c) => ({ key: c.caller, site: c.site })));
     const sc = section('▲ CALLED BY', 'in', `${m.in[fi].length} sites · ${callers.length} fns`);
     for (const [g, sites] of callers.slice(0, 200)) {
@@ -474,7 +476,7 @@ export class Inspector {
       n.onclick = () => this.host.openFn(g);
       row.append(n);
       for (const s of sites.slice(0, 6)) {
-        const a = h('span', { class: 'xr-site', title: 'open the caller at this call site' }, hex(s, 0));
+        const a = h('span', { class: `xr-site ${tailSites.has(s) ? 'tail' : ''}`, title: tailSites.has(s) ? 'tail call (jump into this function)' : 'open the caller at this call site' }, chip(s));
         a.onclick = () => this.host.openFn(g, s);
         row.append(a);
       }
@@ -490,13 +492,50 @@ export class Inspector {
       n.onclick = () => this.host.openFn(g);
       row.append(n);
       for (const s of sites.slice(0, 6)) {
-        const a = h('span', { class: 'xr-site', title: 'go to this call instruction' }, hex(s, 0));
+        const a = h('span', { class: `xr-site ${tailSites.has(s) ? 'tail' : ''}`, title: tailSites.has(s) ? 'tail call (jump into the callee)' : 'go to this call instruction' }, chip(s));
         a.onclick = () => this.host.goto(s);
         a.onmouseenter = () => this.host.hoverAddr(s);
         a.onmouseleave = () => this.host.hoverAddr(null);
         row.append(a);
       }
       so.append(row);
+    }
+    // function-pointer references: who takes this function's address, and whose address it takes
+    const refIn = group(m.refIn[fi].map((r) => ({ key: r.from, site: r.site })));
+    if (refIn.length) {
+      const sr = section('& ADDRESS TAKEN BY', 'ref', `${m.refIn[fi].length} sites · callbacks / tables`);
+      for (const [g, sites] of refIn.slice(0, 200)) {
+        const row = h('div', { class: 'xr-row' });
+        const n = h('span', { class: 'xr-fn' });
+        n.textContent = m.fns[g].name;
+        n.onclick = () => this.host.openFn(g);
+        row.append(n);
+        for (const s of sites.slice(0, 6)) {
+          const a = h('span', { class: 'xr-site', title: 'open the referrer where it loads this address' }, hex(s, 0));
+          a.onclick = () => this.host.openFn(g, s);
+          row.append(a);
+        }
+        sr.append(row);
+      }
+    }
+    const refOut = group(m.refOut[fi].map((r) => ({ key: r.to, site: r.site })));
+    if (refOut.length) {
+      const sr = section('& TAKES ADDRESS OF', 'ref', `${m.refOut[fi].length} sites`);
+      for (const [g, sites] of refOut.slice(0, 200)) {
+        const row = h('div', { class: 'xr-row' });
+        const n = h('span', { class: `xr-fn ${m.fns[g].imp ? 'imp' : ''}` });
+        n.textContent = m.fns[g].name;
+        n.onclick = () => this.host.openFn(g);
+        row.append(n);
+        for (const s of sites.slice(0, 6)) {
+          const a = h('span', { class: 'xr-site' }, hex(s, 0));
+          a.onclick = () => this.host.goto(s);
+          a.onmouseenter = () => this.host.hoverAddr(s);
+          a.onmouseleave = () => this.host.hoverAddr(null);
+          row.append(a);
+        }
+        sr.append(row);
+      }
     }
     const strs = group(m.strOut[fi].map((r) => ({ key: r.vaddr, site: r.site })));
     const ss = section('◇ STRINGS', 'str', `${strs.length}`);
@@ -532,6 +571,8 @@ export class Inspector {
     html += kv('stack frame', `${f.stack} bytes`);
     if (i?.calltype) html += kv('calling convention', i.calltype);
     html += kv('callers / callees', `${m.callers(this.fi).length} fns (${m.in[this.fi].length} sites) / ${m.callees(this.fi).length} fns (${m.out[this.fi].length} sites)`);
+    html += kv('address taken by', `${m.referrers(this.fi).length} fns (${m.refIn[this.fi].length} sites)`);
+    html += kv('tail calls in / out', `${m.in[this.fi].filter((c) => c.kind === 'tail').length} / ${m.out[this.fi].filter((c) => c.kind === 'tail').length}`);
     html += kv('strings referenced', String(new Set(m.strOut[this.fi].map((r) => r.vaddr)).size));
     if (f.sig) html += `<div class="sigbox">${esc(f.sig)}</div>`;
     const vars = [...(v?.reg ?? []).map((x) => ({ ...x, where: 'reg' })), ...(v?.stack ?? []).map((x) => ({ ...x, where: 'stack' }))];

@@ -10,10 +10,11 @@ const C_CALLER = new THREE.Color(0x10f4ff);
 const C_CALLEE = new THREE.Color(0xff2bd6);
 const C_IMPORT = new THREE.Color(0xffb02e);
 const C_BOTH = new THREE.Color(0xe8e6ff);
+const C_REF = new THREE.Color(0xa070ff);
 
 export interface CNode {
   fi: number;
-  role: Role | 'import';
+  role: Role | 'import' | 'ref';
   hop: number;
   pos: THREE.Vector3;
   radius: number;
@@ -93,7 +94,7 @@ export class Constellation {
     const origin = from ?? prev.get(fi) ?? new THREE.Vector3();
     this.fi = fi;
     const nb = m.neighbourhood(fi, 2, 900);
-    const groups: Record<string, number[]> = { up1: [], up2: [], dn1: [], dn2: [], imp: [], both: [] };
+    const groups: Record<string, number[]> = { up1: [], up2: [], dn1: [], dn2: [], imp: [], both: [], ref: [] };
     for (const [g, n] of nb) {
       if (g === fi) continue;
       const imp = m.fns[g].imp;
@@ -102,31 +103,41 @@ export class Constellation {
       else if (imp && n.hop === 1) groups.imp.push(g);
       else if (!imp) groups[n.hop === 1 ? 'dn1' : 'dn2'].push(g);
     }
+    // functions that take this function's address (callbacks, dispatch tables): the
+    // "indirect callers", often the only way in for functions with no direct callers
+    for (const g of m.referrers(fi)) if (!nb.has(g)) groups.ref.push(g);
     // keep the most connected ones when a ring overflows
     const weight = (g: number) => m.in[g].length + m.out[g].length;
     const overflow: { text: string; pos: THREE.Vector3; color: THREE.Color }[] = [];
     const nodes: CNode[] = [];
     const fnF = m.fns[fi];
-    nodes.push({ fi, role: 'focus', hop: 0, pos: new THREE.Vector3(), radius: 2.4 + Math.log2(2 + fnF.size) * 0.18, color: C_FOCUS });
+    nodes.push({ fi, role: 'focus', hop: 0, pos: new THREE.Vector3(), radius: 2.2 + Math.log2(2 + fnF.size) * 0.16, color: C_FOCUS });
+    // scale the whole stage with the neighbourhood size so small graphs aren't dots in a void
+    const total = Object.values(groups).reduce((a, g) => a + Math.min(g.length, 48), 0);
+    const dy = Math.max(9, Math.min(28, 7 + Math.sqrt(total) * 2.4));
+    const spacing = 7;
     const ring = (list: number[], y: number, cap: number, role: CNode['role'], hop: number, color: THREE.Color, rMin: number) => {
+      if (!list.length) return rMin;
       const sorted = [...list].sort((a, b) => weight(b) - weight(a));
       const shown = sorted.slice(0, cap).sort((a, b) => m.fns[a].addr - m.fns[b].addr);
-      const r = Math.max(rMin, (shown.length * 8.5) / (2 * Math.PI));
+      const r = shown.length === 1 ? Math.max(4, rMin * 0.4) : Math.max(rMin, (shown.length * spacing) / (2 * Math.PI));
       shown.forEach((g, i) => {
         const a = (i / Math.max(1, shown.length)) * Math.PI * 2 + hop * 0.3 + (y > 0 ? 0 : 0.15);
         const f = m.fns[g];
-        const col = role === 'import' ? C_IMPORT : role === 'both' ? C_BOTH : color.clone().lerp(heat(Math.min(1, Math.log2(1 + f.cc) / 7)), 0.25);
-        nodes.push({ fi: g, role, hop, pos: new THREE.Vector3(Math.cos(a) * r, y + Math.sin(i * 1.7) * 1.2, Math.sin(a) * r), radius: 0.7 + Math.log2(2 + f.size) * 0.11, color: col });
+        const col = role === 'import' ? C_IMPORT : role === 'both' ? C_BOTH : role === 'ref' ? C_REF : color.clone().lerp(heat(Math.min(1, Math.log2(1 + f.cc) / 7)), 0.25);
+        nodes.push({ fi: g, role, hop, pos: new THREE.Vector3(Math.cos(a) * r, y + Math.sin(i * 1.7) * 0.6, Math.sin(a) * r), radius: 1.0 + Math.log2(2 + f.size) * 0.13, color: col });
       });
-      if (sorted.length > cap) overflow.push({ text: `+${sorted.length - cap} more`, pos: new THREE.Vector3(r + 6, y, 0), color });
+      if (sorted.length > cap) overflow.push({ text: `+${sorted.length - cap} more`, pos: new THREE.Vector3(r + 5, y, 0), color });
       return r;
     };
-    const r1 = ring(groups.up1, 30, RING_CAP[1], 'caller', 1, C_CALLER, 16);
-    ring(groups.up2, 62, RING_CAP[2], 'caller', 2, C_CALLER, r1 + 14);
-    const d1 = ring(groups.dn1, -30, RING_CAP[1], 'callee', 1, C_CALLEE, 16);
-    ring(groups.imp, -48, 40, 'import', 1, C_IMPORT, d1 + 10);
-    ring(groups.dn2, -76, RING_CAP[2], 'callee', 2, C_CALLEE, d1 + 18);
-    ring(groups.both, 0, 24, 'both', 1, C_BOTH, 20);
+    const base = Math.max(8, Math.min(16, 4 + total * 0.5));
+    const r1 = ring(groups.up1, dy, RING_CAP[1], 'caller', 1, C_CALLER, base);
+    const rr = ring(groups.ref, dy * 1.45, 24, 'ref', 1, C_REF, Math.max(base, r1) + 6);
+    ring(groups.up2, dy * 2.1, RING_CAP[2], 'caller', 2, C_CALLER, Math.max(r1, rr) + 8);
+    const d1 = ring(groups.dn1, -dy, RING_CAP[1], 'callee', 1, C_CALLEE, base);
+    ring(groups.imp, -dy * 1.55, 40, 'import', 1, C_IMPORT, d1 + 7);
+    ring(groups.dn2, -dy * 2.3, RING_CAP[2], 'callee', 2, C_CALLEE, d1 + 12);
+    ring(groups.both, 0, 24, 'both', 1, C_BOTH, base + 4);
     this.nodes = nodes;
     this.build(prev, origin, overflow);
     return new Promise((res) => {
@@ -184,10 +195,10 @@ export class Constellation {
     this.group.add(this.mesh);
     const m = this.model;
     const specs: LabelSpec[] = this.nodes.map((nd) => ({
-      text: (nd.role === 'focus' ? '◆ ' : '') + m.fns[nd.fi].name.replace(/^sym\.(imp\.)?/, ''),
+      text: (nd.role === 'focus' ? '◆ ' : nd.role === 'ref' ? '&' : '') + m.fns[nd.fi].name.replace(/^sym\.(imp\.)?/, ''),
       color: nd.role === 'focus' ? PALETTE.yellow : nd.color,
       position: nd.pos.clone().add(new THREE.Vector3(0, nd.radius + (nd.role === 'focus' ? 2.6 : 1.4), 0)),
-      size: nd.role === 'focus' ? 3.2 : 1.7,
+      size: nd.role === 'focus' ? 2.8 : 1.6,
     }));
     this.labels = new LabelField(specs, { fadeFar: 900, fadeNear: 2, px: 32, shrink: 90, depthTest: false, floor: 0.95 });
     this.labels.mesh.renderOrder = 20;
@@ -230,6 +241,17 @@ export class Constellation {
     }
     const specs: RibbonSpec[] = [];
     let tag = 0;
+    // address-taken references: violet, slow, thin (not a call, a pointer being loaded)
+    for (const nd of this.nodes) {
+      for (const r of m.refOut[nd.fi]) {
+        const j = idx.get(r.to);
+        if (j === undefined || r.to === nd.fi) continue;
+        const a = nd.pos.clone();
+        const b = this.nodes[j].pos.clone();
+        const mid = a.clone().lerp(b, 0.5).multiplyScalar(0.7);
+        specs.push({ points: new THREE.QuadraticBezierCurve3(a, mid, b).getPoints(18), color0: C_REF, color1: C_REF, width: 1.4, alpha: 0.55, flow: 5, tag: tag++, ends: [idx.get(nd.fi)!, j] });
+      }
+    }
     for (const p of pairs.values()) {
       const A = this.nodes[p.a];
       const B = this.nodes[p.b];
@@ -280,8 +302,8 @@ export class Constellation {
     const sphere = box.getBoundingSphere(new THREE.Sphere());
     const vfov = THREE.MathUtils.degToRad(fov) / 2;
     const hfov = Math.atan(Math.tan(vfov) * aspect);
-    const dist = (sphere.radius / Math.sin(Math.min(vfov, hfov))) * 0.8;
-    const dir = new THREE.Vector3(0.48, 0.24, 0.84).normalize();
+    const dist = (sphere.radius / Math.sin(Math.min(vfov, hfov))) * 0.78;
+    const dir = new THREE.Vector3(0.4, 0.42, 0.82).normalize();
     return { pos: sphere.center.clone().addScaledVector(dir, dist), target: sphere.center.clone() };
   }
 

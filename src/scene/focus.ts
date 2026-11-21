@@ -12,6 +12,7 @@ const C_IN = new THREE.Color(0x10f4ff);
 const C_OUT = new THREE.Color(0xff2bd6);
 const C_IMP = new THREE.Color(0xffe14d);
 const C_STR = new THREE.Color(0xe6fbff);
+const C_REF = new THREE.Color(0xa070ff);
 
 export interface FocusSite {
   tag: number;
@@ -87,6 +88,15 @@ export class FocusLayer {
     };
     for (const c of model.out[fi]) addSite(c, 'out');
     for (const c of model.in[fi]) if (c.caller !== fi) addSite(c, 'in');
+
+    // address-taken references (function pointers): violet arcs from the loading
+    // instruction in the referrer to the target's roof, both directions
+    for (const r of [...model.refIn[fi], ...model.refOut[fi]]) {
+      const b = entry(r.to);
+      const a = b ? surface(r.from, r.site, b) : null;
+      if (!a || !b) continue;
+      specs.push({ points: arcPoints(a, b, 0.3, 24, 3), color0: C_REF, color1: C_REF, width: 1.8, alpha: 0.6, flow: 8, tag: -20 });
+    }
 
     // further hops: aggregated pair arcs inside the BFS tree
     if (depth > 1) {

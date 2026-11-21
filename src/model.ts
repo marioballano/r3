@@ -6,6 +6,15 @@ export interface CallSite {
   site: number; // address of the call instruction
   caller: number; // fn index
   callee: number; // fn index
+  /** 'call' = bl/call, 'tail' = jump into another function's entry */
+  kind: 'call' | 'tail';
+}
+
+/** Code in `from` takes the address of `to` (callback registration, dispatch tables…). */
+export interface FnRef {
+  site: number;
+  from: number;
+  to: number;
 }
 
 export interface StrRef {
@@ -27,6 +36,9 @@ export class Model {
   out: CallSite[][];
   in: CallSite[][];
   strOut: StrRef[][];
+  /** function-address references */
+  refOut: FnRef[][];
+  refIn: FnRef[][];
   strIn = new Map<number, StrRef[]>();
   strings = new Map<number, StringEntry>();
   private sorted: number[];
@@ -45,9 +57,21 @@ export class Model {
     this.in = Array.from({ length: n }, () => []);
     this.strOut = Array.from({ length: n }, () => []);
     for (const [caller, callee, site] of msg.calls) {
-      const c = { caller, callee, site };
+      const c: CallSite = { caller, callee, site, kind: 'call' };
       this.out[caller].push(c);
       this.in[callee].push(c);
+    }
+    for (const [caller, callee, site] of msg.tails ?? []) {
+      const c: CallSite = { caller, callee, site, kind: 'tail' };
+      this.out[caller].push(c);
+      this.in[callee].push(c);
+    }
+    this.refOut = Array.from({ length: n }, () => []);
+    this.refIn = Array.from({ length: n }, () => []);
+    for (const [from, to, site] of msg.refs ?? []) {
+      const r = { from, to, site };
+      this.refOut[from].push(r);
+      this.refIn[to].push(r);
     }
     this.callCount = msg.calls.length;
     for (const s of info.strings) this.strings.set(s.vaddr, s);
@@ -135,6 +159,16 @@ export class Model {
 
   callees(fi: number): number[] {
     return [...new Set(this.out[fi].map((c) => c.callee))];
+  }
+
+  /** functions whose code takes the address of `fi` */
+  referrers(fi: number): number[] {
+    return [...new Set(this.refIn[fi].map((r) => r.from))];
+  }
+
+  /** functions whose address `fi` takes */
+  referenced(fi: number): number[] {
+    return [...new Set(this.refOut[fi].map((r) => r.to))];
   }
 
   /**
