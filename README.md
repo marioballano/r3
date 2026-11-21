@@ -7,6 +7,15 @@ WebGL world. Functions become a neon city, calls become arcs of light, entropy b
 strings drift overhead, and imports orbit as relays. The soundtrack is generated live and seeded by the binary.
 It's built to look and feel good rather than to replace r2.
 
+![r3 rendering /usr/bin/bash: the entropy halo, import relays and the synthwave horizon](docs/img/hero.jpg)
+
+| | |
+|---|---|
+| ![Call graph of bash: 10k call arcs forming a dome over the function city](docs/img/callgraph-dome.jpg) | ![Street level in the function city, call arcs converging on a hub function](docs/img/city-street.jpg) |
+| *bash's call graph, about 10k arcs over 2,433 function towers* | *Street level: towers sized by function, arcs converging on a hub* |
+| ![The string nebula drifting over the city at dusk](docs/img/string-nebula.jpg) | ![Inside a function: disassembly on glass panels with branch beams](docs/img/function-core.jpg) |
+| *The string nebula* | *Inside a function: the seek highlighted in its basic block* |
+
 ## Requirements
 
 - radare2 (`r2`) in `PATH`. To build it from source: `git clone https://github.com/radareorg/radare2 && radare2/sys/install.sh`
