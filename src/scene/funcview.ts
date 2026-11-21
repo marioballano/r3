@@ -269,7 +269,7 @@ export class FuncView {
     const pxW = Math.ceil(maxChars * cw + PAD_X * 2);
     const pxH = HEADER_H + lines.length * LINE_H + 14;
     const cv = document.createElement('canvas');
-    const scale = 2;
+    const scale = (g.blocks?.length ?? 0) > 150 ? 1 : 2;
     cv.width = pxW * scale;
     cv.height = pxH * scale;
     const c = cv.getContext('2d')!;
