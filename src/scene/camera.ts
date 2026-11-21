@@ -24,6 +24,8 @@ export class CameraRig {
   private tween: gsap.core.Tween | null = null;
   private dragging = false;
   minY = 1.5;
+  /** direction long flights arc towards: up in the city, out of the graph plane in the core */
+  liftAxis = new THREE.Vector3(0, 1, 0);
 
   constructor(
     private engine: Engine,
@@ -149,7 +151,13 @@ export class CameraRig {
     const t0 = this.mode === 'orbit' ? ctl.target.clone() : p0.clone().add(cam.getWorldDirection(new THREE.Vector3()).multiplyScalar(30));
     const dist = p0.distanceTo(pos);
     const mid = p0.clone().lerp(pos, 0.5);
-    mid.y = Math.max(p0.y, pos.y) + Math.min(dist * 0.22, 160) * (dist > 60 ? 1 : 0);
+    const lift = Math.min(dist * 0.22, 160) * (dist > 60 ? 1 : 0);
+    if (this.liftAxis.y > 0.9) mid.y = Math.max(p0.y, pos.y) + lift;
+    else {
+      // keep at least the endpoints' standoff from the subject plane, then bow outwards
+      const along = Math.max(p0.dot(this.liftAxis), pos.dot(this.liftAxis));
+      mid.addScaledVector(this.liftAxis, along - mid.dot(this.liftAxis) + lift * 0.6);
+    }
     const curve = new THREE.QuadraticBezierCurve3(p0, mid, pos.clone());
     const look = new THREE.Vector3();
     const o = { t: 0 };

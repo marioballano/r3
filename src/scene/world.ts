@@ -486,6 +486,7 @@ export class World {
     if (this.constel) this.constel.group.visible = view === 'constellation';
     this.engine.controls.maxPolarAngle = view === 'city' ? Math.PI * 0.495 : Math.PI;
     this.rig.minY = view === 'city' ? 1.5 : -1e9;
+    this.rig.liftAxis.set(0, view === 'function' ? 0 : 1, view === 'function' ? 1 : 0);
     this.setMood(view);
   }
 

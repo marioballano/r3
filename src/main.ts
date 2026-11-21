@@ -189,7 +189,7 @@ class App {
     this.ready = false;
     this.model = null;
     this.sel = null;
-    this.inspector.toggle(false);
+    this.inspector.toggle(false, false);
     const sock = (this.sock = new R2Socket());
     this.hud.setView('JACKING IN');
     this.hud.logLine(`target :: ${path}`);

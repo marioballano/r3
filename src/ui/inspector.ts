@@ -75,8 +75,12 @@ export class Inspector {
     }
   }
 
-  toggle(force?: boolean) {
+  /** the user explicitly closed the panel: navigation updates it quietly instead of reopening it */
+  private userClosed = false;
+
+  toggle(force?: boolean, byUser = true) {
     this.isOpen = force ?? !this.isOpen;
+    if (byUser) this.userClosed = !this.isOpen;
     this.el.classList.toggle('closed', !this.isOpen);
     document.body.classList.toggle('ins-open', this.isOpen);
     this.onToggle(this.isOpen);
@@ -92,7 +96,7 @@ export class Inspector {
   async show(fi: number, seek?: number) {
     const m = this.model();
     if (!m) return;
-    if (!this.isOpen) this.toggle(true);
+    if (!this.isOpen && !this.userClosed) this.toggle(true, false);
     const changed = fi !== this.fi;
     this.fi = fi;
     if (seek !== undefined) this.seek = seek;
