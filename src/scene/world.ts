@@ -4,23 +4,32 @@ import { Engine } from './engine';
 import { createSky } from './sky';
 import { createGround } from './ground';
 import { createHexRain, createMotes } from './particles';
-import { City, type Tower } from './city';
-import { CallArcs } from './callgraph';
+import { CELL, City, type Tower } from './city';
+import { CityArcs, NO_REFLECT_LAYER } from './callgraph';
 import { EntropyHalo } from './entropy';
 import { ImportRing, StringCloud } from './satellites';
 import { FuncView } from './funcview';
+import { FocusLayer } from './focus';
+import { Constellation } from './constellation';
+import { CameraRig } from './camera';
 import { globals } from '../shaders/common';
-import type { Fn, FnGraph, FunctionsMsg, InfoMsg } from '../types';
+import type { Fn, FnGraph, InfoMsg } from '../types';
+import type { Model } from '../model';
 import { audio } from '../audio/audio';
 
-export type View = 'city' | 'function';
+export type View = 'city' | 'constellation' | 'function';
+
+export type Pick =
+  | { kind: 'tower'; fi: number; addr: number; tower: Tower }
+  | { kind: 'sat'; fi: number | null; name: string }
+  | { kind: 'node'; fi: number; index: number }
+  | { kind: 'op'; addr: number }
+  | { kind: 'ring'; site: number; caller: number; callee: number };
 
 export interface WorldEvents {
-  hoverTower?: (t: Tower | null, screen: { x: number; y: number }) => void;
-  clickTower?: (t: Tower) => void;
-  dblTower?: (t: Tower) => void;
-  clickOp?: (addr: number) => void;
-  hoverSat?: (name: string | null, screen: { x: number; y: number }) => void;
+  hover?: (p: Pick | null, screen: { x: number; y: number }) => void;
+  click?: (p: Pick | null) => void;
+  dbl?: (p: Pick | null) => void;
   caption?: (text: string, sub?: string) => void;
 }
 
@@ -29,7 +38,7 @@ function fakeFunctions(n: number): Fn[] {
   let addr = 0x1000;
   for (let i = 0; i < n; i++) {
     const size = Math.floor(Math.pow(Math.random(), 3) * 6000) + 16;
-    out.push({ addr, name: `fcn.${addr.toString(16).padStart(8, '0')}`, size, nbbs: 1 + Math.floor(size / 40), cc: 1 + Math.floor(Math.pow(Math.random(), 2) * 40), ninstrs: size / 4, indeg: 0, outdeg: 0, nargs: 0, nlocals: 0, stack: 0, imp: false });
+    out.push({ addr, name: `fcn.${addr.toString(16).padStart(8, '0')}`, size, nbbs: 1 + Math.floor(size / 40), cc: 1 + Math.floor(Math.pow(Math.random(), 2) * 40), ninstrs: size / 4, indeg: 0, outdeg: 0, nargs: 0, nlocals: 0, stack: 0, imp: false, min: addr, max: addr + size, sig: '' });
     addr += size + 16;
   }
   return out;
@@ -37,16 +46,19 @@ function fakeFunctions(n: number): Fn[] {
 
 export class World {
   engine: Engine;
+  rig: CameraRig;
   ev: WorldEvents = {};
   view: View = 'city';
+  model: Model | null = null;
   city: City | null = null;
-  arcs: CallArcs | null = null;
+  arcs: CityArcs | null = null;
   halo: EntropyHalo | null = null;
   sats: ImportRing | null = null;
   strings: StringCloud | null = null;
   func: FuncView | null = null;
+  constel: Constellation | null = null;
+  focus: FocusLayer | null = null;
   info: InfoMsg | null = null;
-  functions: Fn[] = [];
   private cityGroup = new THREE.Group();
   private ground: ReturnType<typeof createGround>;
   private sky: ReturnType<typeof createSky>;
@@ -55,26 +67,27 @@ export class World {
   private pointer = new THREE.Vector2(9, 9);
   private pointerPx = { x: 0, y: 0 };
   private pointerDirty = false;
-  private hovered: Tower | null = null;
-  private hoveredSat = -1;
-  selected: Tower | null = null;
+  private hoverKey = '';
+  hovered: Pick | null = null;
   private placeholder = true;
   private savedCityCam: { pos: THREE.Vector3; target: THREE.Vector3 } | null = null;
-  private transitioning = false;
+  transitioning = false;
   private touring = false;
-  private tourTimeline: gsap.core.Timeline | null = null;
+  private grid = new Map<string, Tower[]>();
 
   constructor(canvas: HTMLCanvasElement) {
     const engine = (this.engine = new Engine(canvas));
+    engine.camera.layers.enable(NO_REFLECT_LAYER);
+    this.rig = new CameraRig(engine, canvas);
+    engine.rig = this.rig;
+    this.rig.collide = (p) => this.collide(p);
     const scene = engine.scene;
     this.sky = createSky();
     scene.add(this.sky.mesh);
     this.ground = createGround(engine);
     scene.add(this.ground.mesh);
-    const motes = createMotes();
-    scene.add(motes.points);
-    const rain = createHexRain();
-    this.cityGroup.add(rain.mesh);
+    scene.add(createMotes().points);
+    this.cityGroup.add(createHexRain().mesh);
     scene.add(this.cityGroup);
 
     // warp tunnel, parented to the camera
@@ -111,8 +124,7 @@ export class World {
     engine.camera.add(this.tunnel);
     scene.add(engine.camera);
 
-    // placeholder skyline for the boot / picker screens
-    this.buildCity(fakeFunctions(900), [], null);
+    this.buildCity(fakeFunctions(900), null);
     this.city!.rise();
 
     engine.add((dt, t) => {
@@ -120,16 +132,17 @@ export class World {
       this.sky.update(engine.camera);
       this.city?.update(dt);
       this.halo?.update(dt);
-      if (this.arcs) {
-        const u = this.arcs.material.uniforms.uReveal;
-        if (u.value < 1) u.value = Math.min(1, u.value + dt * 0.5);
+      if (this.view === 'function') this.func?.updateLod(engine.camera);
+      if (this.rig.mode === 'drone' && this.rig.locked) {
+        this.pointer.set(0, 0);
+        this.pointerPx = { x: window.innerWidth / 2, y: window.innerHeight / 2 };
+        this.pointerDirty = true;
       }
       if (this.pointerDirty && !this.transitioning) {
         this.pointerDirty = false;
         this.updateHover();
       }
-      const lvl = audio.level();
-      this.engine.bloom.intensity = 1.25 + lvl * 0.8;
+      this.engine.bloom.intensity = 1.25 + audio.level() * 0.8;
     });
 
     canvas.addEventListener('pointermove', (e) => {
@@ -137,18 +150,23 @@ export class World {
       this.pointerPx = { x: e.clientX, y: e.clientY };
       this.pointerDirty = true;
     });
-    canvas.addEventListener('pointerleave', () => this.pointer.set(9, 9));
-    let downAt = { x: 0, y: 0 };
+    canvas.addEventListener('pointerleave', () => {
+      this.pointer.set(9, 9);
+      this.pointerDirty = true;
+    });
+    let downAt = { x: 0, y: 0, b: 0 };
     canvas.addEventListener('pointerdown', (e) => {
-      downAt = { x: e.clientX, y: e.clientY };
+      downAt = { x: e.clientX, y: e.clientY, b: e.button };
       if (this.touring) this.stopTour();
     });
     canvas.addEventListener('click', (e) => {
-      if (Math.hypot(e.clientX - downAt.x, e.clientY - downAt.y) > 5) return;
-      this.onClick();
+      if (downAt.b !== 0 || Math.hypot(e.clientX - downAt.x, e.clientY - downAt.y) > 5) return;
+      if (this.transitioning || this.placeholder) return;
+      this.ev.click?.(this.pickNow());
     });
     canvas.addEventListener('dblclick', () => {
-      if (this.view === 'city' && this.hovered && !this.placeholder) this.ev.dblTower?.(this.hovered);
+      if (this.transitioning || this.placeholder) return;
+      this.ev.dbl?.(this.pickNow());
     });
 
     this.setFog(160);
@@ -157,6 +175,7 @@ export class World {
     engine.start();
   }
 
+  // ------------------------------------------------------------ environment
   private setFog(radius: number) {
     const d = 0.9 / (radius * 2.2 + 380);
     globals.uFogDensity.value = d;
@@ -166,215 +185,219 @@ export class World {
 
   private setMood(view: View) {
     const city = view === 'city';
-    const fogCol = city ? new THREE.Color(0x12052a) : new THREE.Color(0x020814);
+    const fogCol = city ? new THREE.Color(0x12052a) : view === 'function' ? new THREE.Color(0x020814) : new THREE.Color(0x07031a);
     gsap.to(globals.uFogColor.value, { r: fogCol.r, g: fogCol.g, b: fogCol.b, duration: 1 });
-    this.sky.material.uniforms.uIntensity.value = city ? 1 : 0.28;
+    this.sky.material.uniforms.uIntensity.value = city ? 1 : view === 'function' ? 0.28 : 0.5;
     this.ground.mesh.material.uniforms.uFogColor.value = globals.uFogColor.value;
+    audio.setMood(city ? 'city' : 'function');
   }
 
-  private buildCity(functions: Fn[], calls: [number, number][], entry: number | null) {
+  private buildCity(functions: Fn[], entry: number | null) {
     if (this.city) {
       this.cityGroup.remove(this.city.group);
       this.city.dispose();
     }
-    if (this.arcs) {
-      this.cityGroup.remove(this.arcs.mesh);
-      this.arcs.dispose();
-      this.arcs = null;
-    }
     this.city = new City(functions, entry);
     this.cityGroup.add(this.city.group);
     this.ground.setCityRadius(this.city.radius);
-    if (calls.length) {
-      const towerOf = new Map<number, Tower>();
-      for (const t of this.city.towers) towerOf.set(t.fnIndex, t);
-      this.arcs = new CallArcs(
-        calls,
-        (i) => {
-          const t = towerOf.get(i);
-          if (t) return this.city!.top(t);
-          return this.sats?.posOfFn(i) ?? null;
-        },
-        (i) => towerOf.get(i)?.color ?? new THREE.Color(0x00f0ff),
-      );
-      this.cityGroup.add(this.arcs.mesh);
+    // spatial hash for drone collisions
+    this.grid.clear();
+    for (const t of this.city.towers) {
+      const k = `${Math.round(t.pos.x / CELL)},${Math.round(t.pos.z / CELL)}`;
+      (this.grid.get(k) ?? this.grid.set(k, []).get(k)!).push(t);
     }
+  }
+
+  /** Drone collision: stay above ground, slide off buildings. */
+  private collide(p: THREE.Vector3) {
+    p.y = Math.max(p.y, 1.5);
+    if (this.view !== 'city' || !this.city) return;
+    const cx = Math.round(p.x / CELL);
+    const cz = Math.round(p.z / CELL);
+    for (let dx = -1; dx <= 1; dx++)
+      for (let dz = -1; dz <= 1; dz++)
+        for (const t of this.grid.get(`${cx + dx},${cz + dz}`) ?? []) {
+          const m = t.width / 2 + 0.9;
+          const ox = p.x - t.pos.x;
+          const oz = p.z - t.pos.z;
+          if (Math.abs(ox) < m && Math.abs(oz) < m && p.y < t.height + 0.9) {
+            const px = m - Math.abs(ox);
+            const pz = m - Math.abs(oz);
+            const py = t.height + 0.9 - p.y;
+            if (py < px && py < pz) p.y = t.height + 0.9;
+            else if (px < pz) p.x = t.pos.x + Math.sign(ox || 1) * m;
+            else p.z = t.pos.z + Math.sign(oz || 1) * m;
+          }
+        }
   }
 
   // ------------------------------------------------------------ data
   loadInfo(info: InfoMsg) {
     this.info = info;
     audio.seed(info.hash);
-    if (this.halo) {
-      this.cityGroup.remove(this.halo.group);
-      this.halo.dispose();
-    }
-    if (this.strings) {
-      this.cityGroup.remove(this.strings.labels.mesh);
-      this.strings.dispose();
-    }
-    const r = this.city?.radius ?? 120;
-    this.halo = new EntropyHalo(info.entropy, info.sections ?? [], r);
-    this.cityGroup.add(this.halo.group);
-    this.halo.reveal();
-    this.strings = new StringCloud(info.strings ?? [], r);
-    this.cityGroup.add(this.strings.labels.mesh);
     this.engine.glitch(0.5, 0.6);
   }
 
-  loadFunctions(msg: FunctionsMsg) {
-    this.functions = msg.functions;
+  loadModel(model: Model) {
+    this.model = model;
     this.placeholder = false;
-    const entryAddr = this.info?.entries?.[0]?.vaddr ?? msg.seek ?? null;
-    // imports ring must exist before arcs are built
-    if (this.sats) {
-      this.cityGroup.remove(this.sats.group);
-      this.sats.dispose();
-    }
-    // provisional radius to place the ring; rebuilt below once city is known
-    const r = City.radiusFor(msg.functions);
+    this.clearFocus();
+    const entryAddr = this.info?.entries?.[0]?.vaddr ?? null;
+    const r = City.radiusFor(model.fns);
     this.setFog(r);
-    // halo + strings depend on the real city radius
+    for (const o of [this.halo?.group, this.strings?.labels.mesh, this.sats?.group, this.arcs?.mesh]) if (o) this.cityGroup.remove(o);
+    this.halo?.dispose();
+    this.strings?.dispose();
+    this.sats?.dispose();
+    this.arcs?.dispose();
     if (this.info) {
-      if (this.halo) {
-        this.cityGroup.remove(this.halo.group);
-        this.halo.dispose();
-      }
       this.halo = new EntropyHalo(this.info.entropy, this.info.sections ?? [], r);
       this.cityGroup.add(this.halo.group);
       this.halo.reveal();
-      if (this.strings) {
-        this.cityGroup.remove(this.strings.labels.mesh);
-        this.strings.dispose();
-      }
-      this.strings = new StringCloud(this.info.strings ?? [], r);
+      this.strings = new StringCloud(this.info.strings ?? [], r, 260);
       this.cityGroup.add(this.strings.labels.mesh);
     }
-    this.sats = new ImportRing(this.info?.imports ?? [], msg.functions, this.halo?.radius ?? r + 55);
+    this.sats = new ImportRing(this.info?.imports ?? [], model.fns, this.halo?.radius ?? r + 55);
     this.cityGroup.add(this.sats.group);
-    this.buildCity(msg.functions, msg.calls, entryAddr);
-    this.city!.rise();
+    this.buildCity(model.fns, entryAddr);
+    const city = this.city!;
+    this.arcs = new CityArcs(model, {
+      site: (fi, addr) => {
+        const t = city.towerOfFn(fi);
+        return t ? city.floor(t, model.frac(fi, addr)) : (this.sats?.posOfFn(fi)?.clone() ?? null);
+      },
+      entry: (fi) => {
+        const t = city.towerOfFn(fi);
+        return t ? new THREE.Vector3(t.pos.x, t.height, t.pos.z) : (this.sats?.posOfFn(fi)?.clone() ?? null);
+      },
+      color: (fi) => city.towerOfFn(fi)?.color ?? new THREE.Color(0xffd23a),
+    });
+    this.arcs.material.uniforms.uReveal.value = 0;
+    gsap.to(this.arcs.material.uniforms.uReveal, { value: 1, duration: 4, delay: 1.5, ease: 'power1.in' });
+    this.cityGroup.add(this.arcs.mesh);
+    city.rise();
     this.ground.pulse();
     this.engine.flash(0.35, 0.8);
     this.engine.glitch(0.8, 0.7);
     audio.impact();
-    // establishing shot
-    const R = this.city!.radius;
+    const R = city.radius;
     this.flyTo(new THREE.Vector3(R * 1.25, R * 0.6 + 45, R * 1.7), new THREE.Vector3(0, 12, 0), 4.5);
   }
 
   // ------------------------------------------------------------ camera
   flyTo(pos: THREE.Vector3, target: THREE.Vector3, duration = 2.2, ease = 'power3.inOut'): Promise<void> {
-    const cam = this.engine.camera;
-    const ctl = this.engine.controls;
-    gsap.killTweensOf(cam.position);
-    gsap.killTweensOf(ctl.target);
-    return new Promise((res) => {
-      gsap.to(cam.position, { x: pos.x, y: pos.y, z: pos.z, duration, ease });
-      gsap.to(ctl.target, { x: target.x, y: target.y, z: target.z, duration, ease, onComplete: () => res() });
-    });
+    return this.rig.flyTo(pos, target, duration, ease);
   }
 
-  focusTower(t: Tower, duration = 2) {
+  /** Frame a tower; optionally aim at a specific address "floor". */
+  focusTower(t: Tower, duration = 2, addr?: number) {
     const top = this.city!.top(t);
-    const d = Math.max(30, t.height * 1.4 + 25);
+    const d = Math.max(34, t.height * 1.3 + 30);
     const cam = this.engine.camera.position;
-    const dir = new THREE.Vector3(cam.x - top.x, 0, cam.z - top.z).normalize();
-    if (!Number.isFinite(dir.x) || dir.lengthSq() < 0.1) dir.set(0.6, 0, 0.8);
-    const pos = top.clone().add(dir.multiplyScalar(d)).add(new THREE.Vector3(0, d * 0.45 + 6, 0));
-    const target = new THREE.Vector3(t.pos.x, t.height * 0.6, t.pos.z);
+    const dir = new THREE.Vector3(cam.x - top.x, 0, cam.z - top.z);
+    if (dir.lengthSq() < 0.1) dir.set(0.6, 0, 0.8);
+    dir.normalize();
+    const fy = addr !== undefined && this.model ? this.city!.floor(t, this.model.frac(t.fnIndex, addr)).y : t.height * 0.6;
+    const pos = new THREE.Vector3(t.pos.x, fy, t.pos.z).add(dir.multiplyScalar(d)).add(new THREE.Vector3(0, d * 0.35 + 4, 0));
+    const target = new THREE.Vector3(t.pos.x, fy, t.pos.z);
     return this.flyTo(pos, target, duration);
   }
 
-  select(t: Tower | null) {
-    this.selected = t;
-    if (!this.city) return;
-    if (!t) {
-      this.city.setStates(null);
-      this.arcs?.select(-1);
-      this.sats?.select(-1);
-      return;
-    }
+  get isPlaceholder() {
+    return this.placeholder;
+  }
+
+  // ------------------------------------------------------------ focus (in-city call graph)
+  setFocus(fi: number | null, depth = 1) {
+    const m = this.model;
+    const city = this.city;
+    if (!m || !city) return;
+    if (fi === null) return this.clearFocus();
+    if (this.focus && this.focus.fi === fi && this.focus.depth === depth) return;
+    this.clearFocus(false);
+    // string column goes on the camera's left (the Inspector docks on the right)
+    const right = new THREE.Vector3().setFromMatrixColumn(this.engine.camera.matrixWorld, 0);
+    this.focus = new FocusLayer(m, city, this.sats, fi, depth, right.negate());
+    this.focus.finalize();
+    this.cityGroup.add(this.focus.group);
     const states = new Map<number, number>();
-    const idx = this.city.indexOf(t);
-    states.set(idx, 2);
-    const towerIdxOfFn = new Map(this.city.towers.map((x, i) => [x.fnIndex, i]));
-    for (const [a, b] of this.arcs?.edges ?? []) {
-      if (a === t.fnIndex && towerIdxOfFn.has(b)) states.set(towerIdxOfFn.get(b)!, 1);
-      if (b === t.fnIndex && towerIdxOfFn.has(a)) states.set(towerIdxOfFn.get(a)!, 1);
+    const roles = new Map<number, number>();
+    for (const [g, n] of this.focus.nb) {
+      const ti = city.byFn.get(g);
+      if (ti === undefined) continue;
+      states.set(ti, n.hop === 0 ? 2 : n.hop === 1 ? 0.55 : 0.2);
+      if (n.hop > 0) roles.set(ti, n.role === 'caller' ? 1 : n.role === 'callee' ? 2 : 3);
     }
-    this.city.setStates(states);
-    this.arcs?.select(t.fnIndex);
+    city.setStates(states, roles);
+    this.arcs?.setDim(1);
   }
 
-  /** Seek changed: move scene focus to the address. */
-  seek(addr: number, fly = true) {
-    this.halo?.setSeek(addr);
-    if (this.halo) audio.setBrightness(this.halo.entropyAt(addr));
-    if (this.view === 'function' && this.func) {
-      const p = this.func.setSeek(addr);
-      if (p && fly) {
-        const f = this.func.frame(p);
-        this.flyTo(f.pos, f.target, 1.4);
-        return true;
-      }
-      return !!p;
+  clearFocus(restore = true) {
+    if (this.focus) {
+      this.cityGroup.remove(this.focus.group);
+      this.focus.dispose();
+      this.focus = null;
     }
-    const t = this.city?.towerAt(addr);
-    if (t && !this.placeholder) {
-      this.select(t);
-      if (fly) this.focusTower(t);
-      this.ground.pulse();
-      return true;
+    if (restore) {
+      this.city?.setStates(null);
+      this.arcs?.setDim(0);
     }
-    return false;
   }
 
-  // ------------------------------------------------------------ interaction
-  private updateHover() {
-    if (this.pointer.x > 2) return;
+  // ------------------------------------------------------------ picking
+  private pickNow(): Pick | null {
+    if (this.pointer.x > 2) return null;
     this.raycaster.setFromCamera(this.pointer, this.engine.camera);
+    const ray = this.raycaster;
     if (this.view === 'function' && this.func) {
-      const hit = this.raycaster.intersectObjects(this.func.pickables(), false)[0];
-      this.func.hover(hit?.object ?? null);
-      document.body.style.cursor = hit ? 'pointer' : '';
-      return;
-    }
-    if (!this.city || this.placeholder) return;
-    const hits = this.raycaster.intersectObject(this.city.mesh, false);
-    const t = hits[0]?.instanceId !== undefined ? this.city.towers[hits[0].instanceId!] : null;
-    if (t !== this.hovered) {
-      this.hovered = t;
-      if (t) audio.hover();
-      document.body.style.cursor = t ? 'pointer' : '';
-    }
-    this.ev.hoverTower?.(t, this.pointerPx);
-    if (!t && this.sats) {
-      this.raycaster.params.Points = { threshold: 2 };
-      const sh = this.raycaster.intersectObject(this.sats.group.children[0], false)[0];
-      const si = sh?.instanceId ?? -1;
-      if (si !== this.hoveredSat) {
-        this.hoveredSat = si;
-        this.sats.select(si);
-        if (si >= 0) audio.hover();
-      }
-      this.ev.hoverSat?.(si >= 0 ? this.sats.sats[si].name : null, this.pointerPx);
-    }
-  }
-
-  private onClick() {
-    if (this.transitioning) return;
-    if (this.view === 'function' && this.func) {
-      this.raycaster.setFromCamera(this.pointer, this.engine.camera);
-      const hit = this.raycaster.intersectObjects(this.func.pickables(), false)[0];
+      const hit = ray.intersectObjects(this.func.pickables(), false)[0];
       if (hit?.uv) {
         const addr = this.func.opAtHit(hit.object, hit.uv);
-        if (addr !== null) this.ev.clickOp?.(addr);
+        if (addr !== null) return { kind: 'op', addr };
       }
-      return;
+      return null;
     }
-    if (this.hovered && !this.placeholder) this.ev.clickTower?.(this.hovered);
-    else if (!this.hovered && this.selected) this.select(null);
+    if (this.view === 'constellation' && this.constel) {
+      const i = this.constel.pick(ray);
+      return i >= 0 ? { kind: 'node', fi: this.constel.nodes[i].fi, index: i } : null;
+    }
+    if (!this.city || this.placeholder || !this.model) return null;
+    const hits = ray.intersectObject(this.city.mesh, false);
+    const h = hits[0];
+    if (h?.instanceId !== undefined) {
+      const t = this.city.towers[h.instanceId];
+      const f = this.model.fns[t.fnIndex];
+      const frac = this.city.fracAtY(t, h.point.y);
+      // snap to the nearest real call site on this floor if we're in focus mode
+      const addr = Math.round(f.min + frac * (f.max - f.min));
+      return { kind: 'tower', fi: t.fnIndex, addr, tower: t };
+    }
+    if (this.sats) {
+      const sh = ray.intersectObject(this.sats.group.children[0], false)[0];
+      if (sh?.instanceId !== undefined) {
+        const s = this.sats.sats[sh.instanceId];
+        return { kind: 'sat', fi: s.fnIndex, name: s.name };
+      }
+    }
+    return null;
+  }
+
+  private updateHover() {
+    const p = this.pickNow();
+    const key = p ? `${p.kind}:${'fi' in p ? p.fi : ''}:${'index' in p ? p.index : ''}:${p.kind === 'op' ? p.addr : ''}` : '';
+    this.hovered = p;
+    if (this.view === 'function' && this.func) {
+      const hit = p?.kind === 'op' ? this.func.panelAt(p.addr) : null;
+      this.func.hover(hit ? hit.mesh : null);
+    }
+    if (this.view === 'constellation' && this.constel) this.constel.hover(p?.kind === 'node' ? p.index : -1);
+    if (this.view === 'city' && this.sats) this.sats.select(p?.kind === 'sat' ? this.sats.sats.findIndex((s) => s.name === p.name) : -1);
+    if (key !== this.hoverKey) {
+      this.hoverKey = key;
+      if (p && p.kind !== 'op') audio.hover();
+      document.body.style.cursor = p ? 'pointer' : '';
+    }
+    this.ev.hover?.(p, this.pointerPx);
   }
 
   // ------------------------------------------------------------ views
@@ -383,26 +406,21 @@ export class World {
     (this.tunnel.material as THREE.ShaderMaterial).uniforms.uOpacity.value = v;
   }
 
-  async enterFunction(graph: FnGraph) {
-    if (this.transitioning) return;
-    this.stopTour();
+  /** Dive → swap scenes behind a flash → arrive. */
+  private async warp(swap: () => Promise<{ pos: THREE.Vector3; target: THREE.Vector3 }>, out = false) {
     this.transitioning = true;
+    this.rig.stop();
     const cam = this.engine.camera;
     const ctl = this.engine.controls;
-    if (this.view === 'city') this.savedCityCam = { pos: cam.position.clone(), target: ctl.target.clone() };
-    audio.whoosh(1.3, true);
-    this.engine.glitch(0.4, 1.0);
+    audio.whoosh(out ? 1.1 : 1.3, !out);
+    this.engine.glitch(0.45, 1.0);
     const warp = { v: 0, fov: cam.fov };
-    // dive toward target
-    const dir = new THREE.Vector3().subVectors(ctl.target, cam.position).normalize();
-    const dive = cam.position.clone().add(dir.multiplyScalar(cam.position.distanceTo(ctl.target) * 0.8));
-    await Promise.all([
+    const tw = (to: { v: number; fov: number }, d: number, ease: string) =>
       new Promise<void>((r) =>
         gsap.to(warp, {
-          v: 1,
-          fov: 105,
-          duration: 1.0,
-          ease: 'power2.in',
+          ...to,
+          duration: d,
+          ease,
           onUpdate: () => {
             this.setWarp(warp.v);
             cam.fov = warp.fov;
@@ -410,105 +428,96 @@ export class World {
           },
           onComplete: () => r(),
         }),
-      ),
-      this.flyTo(dive, ctl.target.clone(), 1.0, 'power2.in'),
-    ]);
-    this.engine.flash(1.0, 0.6);
+      );
+    const look = this.rig.mode === 'orbit' ? ctl.target.clone() : cam.position.clone().add(cam.getWorldDirection(new THREE.Vector3()).multiplyScalar(40));
+    const dive = cam.position.clone().lerp(look, out ? -0.4 : 0.8);
+    await Promise.all([tw({ v: 1, fov: out ? 32 : 105 }, out ? 0.7 : 1.0, 'power2.in'), this.flyTo(dive, look, out ? 0.7 : 1.0, 'power2.in')]);
+    this.engine.flash(out ? 0.7 : 1.0, 0.6);
     audio.impact();
-    // swap worlds
-    if (this.func) {
-      this.engine.scene.remove(this.func.group);
-      this.func.dispose();
-    }
-    this.func = new FuncView(graph);
-    this.engine.scene.add(this.func.group);
-    this.cityGroup.visible = false;
-    this.ground.mesh.visible = false;
-    this.view = 'function';
-    this.setMood('function');
-    audio.setMood('function');
-    this.engine.controls.maxPolarAngle = Math.PI;
-    const entryPanel = this.func.setSeek(graph.addr);
-    const f = graph.blocks.length > 3 ? this.func.overview() : this.func.frame(entryPanel);
-    cam.position.copy(f.pos).add(new THREE.Vector3(0, 0, 160));
-    ctl.target.copy(f.target);
-    this.func.reveal((fn) => this.engine.add(fn));
-    await Promise.all([
-      new Promise<void>((r) =>
-        gsap.to(warp, {
-          v: 0,
-          fov: 55,
-          duration: 1.6,
-          ease: 'power3.out',
-          onUpdate: () => {
-            this.setWarp(warp.v);
-            cam.fov = warp.fov;
-            cam.updateProjectionMatrix();
-          },
-          onComplete: () => r(),
-        }),
-      ),
-      this.flyTo(f.pos, f.target, 1.8, 'power3.out'),
-    ]);
+    const land = await swap();
+    cam.position.copy(land.pos).add(land.pos.clone().sub(land.target).normalize().multiplyScalar(out ? -30 : 120));
+    if (this.rig.mode === 'orbit') ctl.target.copy(land.target);
+    else cam.lookAt(land.target);
+    await Promise.all([tw({ v: 0, fov: 55 }, 1.5, 'power3.out'), this.flyTo(land.pos, land.target, 1.7, 'power3.out')]);
     this.transitioning = false;
   }
 
-  async exitFunction() {
-    if (this.view !== 'function' || this.transitioning) return;
-    this.transitioning = true;
+  private showOnly(view: View) {
+    this.view = view;
+    this.cityGroup.visible = view === 'city';
+    this.ground.mesh.visible = view === 'city';
+    if (this.func) this.func.group.visible = view === 'function';
+    if (this.constel) this.constel.group.visible = view === 'constellation';
+    this.engine.controls.maxPolarAngle = view === 'city' ? Math.PI * 0.495 : Math.PI;
+    this.rig.minY = view === 'city' ? 1.5 : -1e9;
+    this.setMood(view);
+  }
+
+  private rememberCity() {
+    if (this.view !== 'city') return;
     const cam = this.engine.camera;
-    const ctl = this.engine.controls;
-    audio.whoosh(1.1, false);
-    this.engine.glitch(0.5, 0.8);
-    const warp = { v: 0, fov: cam.fov };
-    await new Promise<void>((r) =>
-      gsap.to(warp, {
-        v: 1,
-        fov: 30,
-        duration: 0.7,
-        ease: 'power2.in',
-        onUpdate: () => {
-          this.setWarp(warp.v);
-          cam.fov = warp.fov;
-          cam.updateProjectionMatrix();
-        },
-        onComplete: () => r(),
-      }),
-    );
-    this.engine.flash(0.7, 0.5);
-    if (this.func) {
-      this.engine.scene.remove(this.func.group);
-      this.func.dispose();
-      this.func = null;
+    const target = this.rig.mode === 'orbit' ? this.engine.controls.target.clone() : cam.position.clone().add(cam.getWorldDirection(new THREE.Vector3()).multiplyScalar(40));
+    this.savedCityCam = { pos: cam.position.clone(), target };
+  }
+
+  async enterFunction(graph: FnGraph, seek?: number) {
+    if (this.transitioning) return;
+    this.stopTour();
+    this.rememberCity();
+    const fv = new FuncView(graph);
+    await this.warp(async () => {
+      await fv.ready;
+      if (this.func) {
+        this.engine.scene.remove(this.func.group);
+        this.func.dispose();
+      }
+      this.func = fv;
+      this.engine.scene.add(fv.group);
+      this.showOnly('function');
+      const p = fv.setSeek(seek ?? graph.addr);
+      fv.reveal((fn) => this.engine.add(fn));
+      return seek !== undefined && seek !== graph.addr && p ? fv.frameOf(p) : fv.overview();
+    });
+  }
+
+  async enterConstellation(fi: number) {
+    if (!this.model || this.transitioning) return;
+    this.stopTour();
+    this.rememberCity();
+    if (this.view === 'constellation' && this.constel) {
+      await this.recenter(fi);
+      return;
     }
-    this.cityGroup.visible = true;
-    this.ground.mesh.visible = true;
-    this.view = 'city';
-    this.setMood('city');
-    audio.setMood('city');
-    this.engine.controls.maxPolarAngle = Math.PI * 0.495;
-    const back = this.savedCityCam ?? { pos: new THREE.Vector3(200, 200, 300), target: new THREE.Vector3() };
-    const start = back.pos.clone().sub(back.target).multiplyScalar(0.35).add(back.target);
-    cam.position.copy(start);
-    ctl.target.copy(back.target);
-    await Promise.all([
-      new Promise<void>((r) =>
-        gsap.to(warp, {
-          v: 0,
-          fov: 55,
-          duration: 1.4,
-          ease: 'power3.out',
-          onUpdate: () => {
-            this.setWarp(warp.v);
-            cam.fov = warp.fov;
-            cam.updateProjectionMatrix();
-          },
-          onComplete: () => r(),
-        }),
-      ),
-      this.flyTo(back.pos, back.target, 1.6, 'power3.out'),
-    ]);
-    this.transitioning = false;
+    await this.warp(async () => {
+      if (!this.constel) {
+        this.constel = new Constellation(this.model!);
+        this.engine.scene.add(this.constel.group);
+      }
+      this.showOnly('constellation');
+      const done = this.constel.center(fi);
+      void done;
+      return this.constel.overview();
+    });
+  }
+
+  async recenter(fi: number) {
+    if (!this.constel) return;
+    audio.whoosh(0.9, true);
+    this.engine.glitch(0.25, 0.5);
+    const from = this.constel.nodes.find((n) => n.fi === fi)?.pos.clone();
+    const p = this.constel.center(fi, from);
+    const o = this.constel.overview();
+    this.flyTo(o.pos, o.target, 1.4);
+    await p;
+  }
+
+  async backToCity() {
+    if (this.view === 'city' || this.transitioning) return;
+    await this.warp(async () => {
+      this.showOnly('city');
+      const back = this.savedCityCam ?? { pos: new THREE.Vector3(200, 200, 300), target: new THREE.Vector3() };
+      return back;
+    }, true);
   }
 
   // ------------------------------------------------------------ highlights
@@ -521,7 +530,7 @@ export class World {
     if (!this.strings) return;
     const u = this.strings.labels.material.uniforms;
     gsap.fromTo(u.uPulse, { value: 1.5 }, { value: 0, duration: 3, ease: 'power2.out' });
-    gsap.fromTo(u.uOpacity, { value: 1 }, { value: 0.7, duration: 3 });
+    gsap.fromTo(u.uOpacity, { value: 1 }, { value: 0.5, duration: 3 });
     const R = this.city?.radius ?? 100;
     this.flyTo(new THREE.Vector3(R * 0.4, 140, R * 1.3), new THREE.Vector3(0, 170, 0), 2.4);
   }
@@ -544,6 +553,14 @@ export class World {
   }
 
   overview() {
+    if (this.view === 'function' && this.func) {
+      const o = this.func.overview();
+      return this.flyTo(o.pos, o.target, 1.6);
+    }
+    if (this.view === 'constellation' && this.constel) {
+      const o = this.constel.overview();
+      return this.flyTo(o.pos, o.target, 1.6);
+    }
     const R = this.city?.radius ?? 120;
     return this.flyTo(new THREE.Vector3(R * 1.5, R * 1.1 + 80, R * 2.0), new THREE.Vector3(0, 10, 0), 2.6);
   }
@@ -556,8 +573,8 @@ export class World {
     const R = this.city.radius;
     const towers = this.city.towers;
     const biggest = [...towers].sort((a, b) => b.fn.size - a.fn.size)[0];
-    const hub = [...towers].sort((a, b) => b.fn.indeg - a.fn.indeg)[0];
-    const complex = [...towers].sort((a, b) => b.fn.cc - a.fn.cc)[0];
+    const hub = [...towers].sort((a, b) => (this.model?.in[b.fnIndex].length ?? 0) - (this.model?.in[a.fnIndex].length ?? 0))[0];
+    const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
     const steps: (() => Promise<void>)[] = [
       async () => {
         this.ev.caption?.('// ESTABLISHING UPLINK', this.info?.path);
@@ -573,9 +590,8 @@ export class World {
             duration: 7,
             ease: 'sine.inOut',
             onUpdate: () => {
-              const ang = a.t;
-              this.engine.camera.position.set(Math.cos(ang) * (H + 60), 45, Math.sin(ang) * (H + 60));
-              this.engine.controls.target.set(Math.cos(ang + 0.5) * H, 30, Math.sin(ang + 0.5) * H);
+              this.engine.camera.position.set(Math.cos(a.t) * (H + 60), 45, Math.sin(a.t) * (H + 60));
+              this.engine.controls.target.set(Math.cos(a.t + 0.5) * H, 30, Math.sin(a.t + 0.5) * H);
             },
             onComplete: () => res(),
           }),
@@ -584,29 +600,21 @@ export class World {
       async () => {
         if (!biggest) return;
         this.ev.caption?.(`// MEGASTRUCTURE ${biggest.fn.name}`, `${biggest.fn.size} bytes · ${biggest.fn.nbbs} blocks`);
-        this.select(biggest);
         await this.focusTower(biggest, 3.5);
-        await new Promise((r) => setTimeout(r, 1500));
+        await wait(1500);
       },
       async () => {
-        if (!hub) return;
-        this.ev.caption?.(`// HUB ${hub.fn.name}`, `called from ${hub.fn.indeg} sites`);
-        this.select(hub);
+        if (!hub || !this.model) return;
+        this.ev.caption?.(`// HUB ${hub.fn.name}`, `called from ${this.model.in[hub.fnIndex].length} call sites`);
+        this.setFocus(hub.fnIndex, 1);
         await this.focusTower(hub, 3.5);
-        await new Promise((r) => setTimeout(r, 1500));
-      },
-      async () => {
-        if (!complex) return;
-        this.ev.caption?.(`// LABYRINTH ${complex.fn.name}`, `cyclomatic complexity ${complex.fn.cc}`);
-        this.select(complex);
-        await this.focusTower(complex, 3.5);
-        await new Promise((r) => setTimeout(r, 1500));
+        await wait(2500);
+        this.clearFocus();
       },
       async () => {
         this.ev.caption?.('// STRING NEBULA', `${this.info?.strings.length ?? 0} strings adrift`);
-        this.select(null);
         await this.flyTo(new THREE.Vector3(R * 0.3, 150, R * 0.9), new THREE.Vector3(0, 175, 0), 3.5);
-        await new Promise((r) => setTimeout(r, 1200));
+        await wait(1200);
       },
       async () => {
         this.ev.caption?.('// IMPORT RELAYS', `${this.sats?.sats.length ?? 0} uplinks to the outside world`);
@@ -614,7 +622,7 @@ export class World {
         await this.flyTo(new THREE.Vector3(S * 0.9, 90, S * 0.6), new THREE.Vector3(S * 0.3, 60, S * 0.9), 4);
       },
       async () => {
-        this.ev.caption?.('// END OF LINE', 'press ~ for the shell · click a tower · double-click to dive');
+        this.ev.caption?.('// END OF LINE', 'click a tower to focus · C constellation · Enter core · F drone · Ctrl+K search');
         await this.overview();
       },
     ];
@@ -629,11 +637,14 @@ export class World {
   stopTour() {
     if (!this.touring) return;
     this.touring = false;
-    this.tourTimeline?.kill();
+    this.rig.stop();
     this.ev.caption?.('');
   }
 
-  get isPlaceholder() {
-    return this.placeholder;
+  // ------------------------------------------------------------ minimap support
+  cameraXZ() {
+    const cam = this.engine.camera;
+    const d = cam.getWorldDirection(new THREE.Vector3());
+    return { x: cam.position.x, z: cam.position.z, dx: d.x, dz: d.z, fov: cam.fov, aspect: cam.aspect };
   }
 }

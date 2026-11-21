@@ -101,6 +101,7 @@ export class Engine {
   quality = 2; // 2 high, 1 medium, 0 low
   autoQuality = true;
   idleOrbit = true;
+  rig: { update(dt: number): void } | null = null;
 
   constructor(canvas: HTMLCanvasElement) {
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: false, powerPreference: 'high-performance', stencil: false, depth: true });
@@ -124,6 +125,7 @@ export class Engine {
     this.controls.rotateSpeed = 0.55;
     this.controls.zoomSpeed = 0.9;
     this.controls.autoRotateSpeed = 0.25;
+    this.controls.zoomToCursor = true;
     this.controls.addEventListener('start', () => this.touch());
 
     this.composer = new EffectComposer(this.renderer, { frameBufferType: THREE.HalfFloatType, multisampling: 4 });
@@ -152,10 +154,36 @@ export class Engine {
     return () => this.updaters.delete(fn);
   }
 
+  private centerShift = 0;
+  private shiftTween: { v: number } = { v: 0 };
+
+  /** Shift the projection centre left by `px` (keeps the subject clear of a docked panel). */
+  setCenterShift(px: number) {
+    this.centerShift = px;
+    const o = this.shiftTween;
+    const start = o.v;
+    const t0 = this.time;
+    const off = this.add(() => {
+      const k = Math.min(1, (this.time - t0) / 0.45);
+      o.v = start + (px - start) * (1 - Math.pow(1 - k, 3));
+      this.applyShift();
+      if (k >= 1) off();
+    });
+  }
+
+  private applyShift() {
+    const w = window.innerWidth;
+    const h = window.innerHeight;
+    if (Math.abs(this.shiftTween.v) < 0.5) this.camera.clearViewOffset();
+    else this.camera.setViewOffset(w, h, this.shiftTween.v, 0, w, h);
+  }
+
   resize() {
     const w = window.innerWidth;
     const h = window.innerHeight;
     this.camera.aspect = w / h;
+    this.applyShift();
+    void this.centerShift;
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(w, h);
     this.composer.setSize(w, h);
@@ -197,9 +225,10 @@ export class Engine {
       const dt = Math.min(this.clock.getDelta(), 0.1);
       this.time += dt;
       this.cyber.u('uTime').value = this.time;
-      if (this.idleOrbit && this.idleSeconds > 25) this.controls.autoRotate = true;
+      if (this.idleOrbit && this.controls.enabled && this.idleSeconds > 45) this.controls.autoRotate = true;
       for (const u of this.updaters) u(dt, this.time);
-      this.controls.update(dt);
+      if (this.rig) this.rig.update(dt);
+      else this.controls.update(dt);
       this.composer.render(dt);
       this.trackPerf(dt);
     };

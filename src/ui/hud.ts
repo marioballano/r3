@@ -1,4 +1,3 @@
-import type { Tower } from '../scene/city';
 import { hex, humanSize, type EntropyData, type InfoMsg } from '../types';
 import { audio } from '../audio/audio';
 import { h, scramble } from './dom';
@@ -12,11 +11,15 @@ export class Hud {
   private viewEl = h('div', { class: 'view' }, 'STANDBY');
   private stats = h('div', { class: 'stats' });
   private ent = h('canvas');
-  private tip = h('div', { class: 'tip hidden' });
+  private tip_ = h('div', { class: 'tip hidden' });
   private cap = h('div', { class: 'caption' }, h('div', { class: 'c1' }), h('div', { class: 'c2' }));
   private log = h('div', { class: 'log' });
   private prog = h('div', { class: 'prog hidden' }, h('div', { class: 'pct' }, '0%'), h('div', { class: 'txt' }, ''), h('div', { class: 'bar' }, h('div', { class: 'fill' })));
   private mute = h('span', { class: 'mute' });
+  private modeEl = h('div', { class: 'mode' }, 'ORBIT');
+  private cross = h('div', { class: 'crosshair hidden' });
+  private crumbs = h('div', { class: 'crumbs' });
+  private depthEl = h('div', { class: 'depth hidden' });
   private entropy: EntropyData | null = null;
   private seekFrac = -1;
   private capTimer = 0;
@@ -37,7 +40,9 @@ export class Hud {
     animBars();
     this.el.append(
       h('div', { class: 'tl' }, h('div', { class: 'brand' }, 'r3', h('small', {}, 'radare2 // 3d')), this.file, this.meta),
-      h('div', { class: 'tr' }, this.seekEl, this.fname, this.viewEl),
+      h('div', { class: 'tr' }, this.seekEl, this.fname, this.viewEl, this.modeEl, this.depthEl),
+      this.crumbs,
+      this.cross,
       this.stats,
       this.log,
       this.cap,
@@ -46,10 +51,29 @@ export class Hud {
         'div',
         { class: 'bottom' },
         h('div', { class: 'ent' }, h('div', { class: 'lbl' }, 'ENTROPY'), this.ent),
-        h('div', { class: 'keys' }, h('kbd', {}, '~'), 'shell ', h('kbd', {}, 'T'), 'tour ', h('kbd', {}, 'Esc'), 'back ', h('kbd', {}, 'dbl-click'), 'dive  '),
+        h(
+          'div',
+          { class: 'keys' },
+          h('kbd', {}, 'Ctrl K'),
+          'search ',
+          h('kbd', {}, 'F'),
+          'drone ',
+          h('kbd', {}, 'C'),
+          'graph ',
+          h('kbd', {}, '⏎'),
+          'core ',
+          h('kbd', {}, 'I'),
+          'inspect ',
+          h('kbd', {}, '~'),
+          'shell ',
+          h('kbd', {}, 'Alt ←'),
+          'back ',
+          h('kbd', {}, '?'),
+          'help ',
+        ),
         this.mute,
       ),
-      this.tip,
+      this.tip_,
     );
     root.append(this.el);
     window.addEventListener('resize', () => this.drawEntropy());
@@ -103,26 +127,38 @@ export class Hud {
     this.capTimer = window.setTimeout(() => (this.cap.style.opacity = '0'), 6000);
   }
 
-  tower(t: Tower | null, p: { x: number; y: number }) {
-    if (!t) {
-      this.tip.classList.add('hidden');
-      return;
-    }
-    this.tip.classList.remove('hidden');
-    this.tip.style.left = `${p.x}px`;
-    this.tip.style.top = `${p.y}px`;
-    const f = t.fn;
-    this.tip.innerHTML = `<div class="n"></div><div class="a">${hex(f.addr)}</div><div><span class="k">size</span> <span class="v">${f.size}</span> <span class="k">blocks</span> <span class="v">${f.nbbs}</span> <span class="k">cc</span> <span class="v">${f.cc}</span></div><div><span class="k">calls in</span> <span class="v">${f.indeg}</span> <span class="k">out</span> <span class="v">${f.outdeg}</span> <span class="k">args</span> <span class="v">${f.nargs}</span></div>`;
-    (this.tip.firstChild as HTMLElement).textContent = f.name;
+  /** Rich tooltip near the cursor (html is trusted, built by the app). */
+  tip(html: string | null, p: { x: number; y: number }) {
+    if (!html) return this.tip_.classList.add('hidden');
+    this.tip_.classList.remove('hidden');
+    this.tip_.innerHTML = html;
+    const w = this.tip_.offsetWidth;
+    const x = p.x + 18 + w > window.innerWidth - (document.body.classList.contains('ins-open') ? 500 : 10) ? p.x - w - 18 : p.x + 18;
+    this.tip_.style.left = `${x}px`;
+    this.tip_.style.top = `${p.y + 18}px`;
+    this.tip_.style.transform = 'none';
   }
 
-  sat(name: string | null, p: { x: number; y: number }) {
-    if (!name) return this.tip.classList.add('hidden');
-    this.tip.classList.remove('hidden');
-    this.tip.style.left = `${p.x}px`;
-    this.tip.style.top = `${p.y}px`;
-    this.tip.innerHTML = `<div class="k">IMPORT RELAY</div><div class="n"></div>`;
-    (this.tip.lastChild as HTMLElement).textContent = name;
+  setMode(mode: string) {
+    this.modeEl.textContent = mode === 'drone' ? '◉ DRONE · WASD QE ⇧ · RMB/lock look' : '○ ORBIT';
+    this.modeEl.classList.toggle('drone', mode === 'drone');
+    this.cross.classList.toggle('hidden', mode !== 'drone');
+  }
+
+  setDepth(d: number | null) {
+    this.depthEl.classList.toggle('hidden', d === null);
+    if (d !== null) this.depthEl.innerHTML = `FOCUS DEPTH ${[1, 2, 3].map((k) => `<span class="${k === d ? 'on' : ''}">${k}</span>`).join('')}`;
+  }
+
+  setCrumbs(items: { label: string; current: boolean; onClick: () => void }[]) {
+    this.crumbs.innerHTML = '';
+    items.forEach((it, i) => {
+      if (i) this.crumbs.append(h('span', { class: 'sep' }, '›'));
+      const c = h('span', { class: `crumb ${it.current ? 'cur' : ''}` });
+      c.textContent = it.label;
+      c.onclick = it.onClick;
+      this.crumbs.append(c);
+    });
   }
 
   logLine(text: string, ok = false) {

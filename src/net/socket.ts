@@ -1,4 +1,4 @@
-import type { FnGraph, FunctionsMsg, InfoMsg } from '../types';
+import type { FnGraph, FunctionsMsg, InfoMsg, InspectMsg } from '../types';
 
 export interface OutMsg {
   t: 'out';
@@ -73,6 +73,16 @@ export class R2Socket {
   async query<T = unknown>(cmd: string): Promise<T | null> {
     const m = await this.req<{ data: T | null }>({ t: 'query', cmd });
     return m.data;
+  }
+
+  async inspect(addr: number): Promise<InspectMsg | null> {
+    const m = await this.req<InspectMsg>({ t: 'inspect', addr });
+    return m ? { info: m.info, vars: m.vars, ops: m.ops ?? [] } : null;
+  }
+
+  async pdc(addr: number): Promise<string> {
+    const m = await this.req<{ text: string }>({ t: 'pdc', addr });
+    return m?.text ?? '';
   }
 
   async fn(addr: number): Promise<FnGraph | null> {

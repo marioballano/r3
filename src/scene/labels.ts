@@ -23,7 +23,7 @@ export class LabelField {
 
   constructor(
     specs: LabelSpec[],
-    opts: { atlas?: number; px?: number; fadeNear?: number; fadeFar?: number; drift?: number; depthTest?: boolean; shrink?: number } = {},
+    opts: { atlas?: number; px?: number; fadeNear?: number; fadeFar?: number; drift?: number; depthTest?: boolean; shrink?: number; floor?: number } = {},
   ) {
     const W = opts.atlas ?? 2048;
     const px = opts.px ?? 36;
@@ -100,6 +100,7 @@ export class LabelField {
         uPulse: { value: 0 },
         uReveal: { value: 1 },
         uShrink: { value: opts.shrink ?? 0.0001 },
+        uFloor: { value: opts.floor ?? 0.55 },
       },
       vertexShader: /* glsl */ `
         uniform float uTime;
@@ -142,6 +143,7 @@ export class LabelField {
         uniform float uOpacity;
         uniform float uPulse;
         uniform float uTime;
+        uniform float uFloor;
         varying vec2 vUv;
         varying vec3 vColor;
         varying float vDist;
@@ -154,7 +156,7 @@ export class LabelField {
           float b = (1.0 + vHi * 2.2 + uPulse * 1.6) * flick;
           vec3 col = mix(vColor, vec3(1.0), vHi * 0.45);
           float fog = exp(-uFogDensity * uFogDensity * vDist * vDist * 0.5);
-          gl_FragColor = vec4(col * b, a * fade * uOpacity * fog * max(0.55, vHi));
+          gl_FragColor = vec4(col * b, a * fade * uOpacity * fog * max(uFloor, vHi));
         }`,
     });
     this.mesh = new THREE.Mesh(geo, this.material);

@@ -4,33 +4,21 @@ import { createReadStream } from 'node:fs';
 import type { WebSocket } from 'ws';
 import { R2Pipe } from './r2pipe.js';
 import { resolveBinary } from './fsbrowse.js';
+import { buildGraph, parseBlocks, type AflEntry, type XrefEntry } from './graph.js';
 
 type Msg =
   | { t: 'open'; path: string }
   | { t: 'cmd'; id: number; cmd: string; cols?: number }
   | { t: 'query'; id: number; cmd: string }
-  | { t: 'fn'; id: number; addr: number };
+  | { t: 'fn'; id: number; addr: number }
+  | { t: 'inspect'; id: number; addr: number }
+  | { t: 'pdc'; id: number; addr: number };
 
 const MAX_OUT = 512 * 1024;
-const MAX_STRINGS = 1200;
+const MAX_STRINGS = 20000;
+const MAX_STRLEN = 200;
 const MAX_SYMBOLS = 3000;
 const AAA_LIMIT = 4 * 1024 * 1024;
-
-interface AflEntry {
-  addr: number;
-  name: string;
-  size: number;
-  realsz?: number;
-  nbbs?: number;
-  cc?: number;
-  ninstrs?: number;
-  indegree?: number;
-  outdegree?: number;
-  type?: string;
-  nargs?: number;
-  nlocals?: number;
-  stackframe?: number;
-}
 
 function hashFile(file: string, size: number): Promise<string> {
   return new Promise((resolve) => {
@@ -98,8 +86,24 @@ export class Session {
       }
       case 'fn': {
         const r2 = this.need();
-        const g = await r2.cmdj<unknown[]>(`agfj @ ${Number(msg.addr)}`, 20_000);
+        const g = await r2.cmdj<unknown[]>(`agfj @ ${Number(msg.addr)}`, 30_000);
         return this.send({ t: 'fn', id: msg.id, addr: msg.addr, graph: Array.isArray(g) ? g[0] ?? null : null });
+      }
+      case 'inspect': {
+        // everything the Inspector needs about one function, in one round-trip
+        const r2 = this.need();
+        const a = Number(msg.addr);
+        const [info, vars, dis] = await Promise.all([
+          r2.cmdj<unknown[]>(`afij @ ${a}`, 20_000),
+          r2.cmdj(`afvj @ ${a}`, 20_000),
+          r2.cmdj<{ ops?: unknown[] }>(`pdfj @ ${a}`, 60_000),
+        ]);
+        return this.send({ t: 'inspect', id: msg.id, addr: a, info: Array.isArray(info) ? info[0] ?? null : null, vars, ops: dis?.ops ?? [] });
+      }
+      case 'pdc': {
+        const r2 = this.need();
+        const text = await r2.cmd(`pdc @ ${Number(msg.addr)}`, 60_000);
+        return this.send({ t: 'pdc', id: msg.id, addr: msg.addr, text: text.length > MAX_OUT ? text.slice(0, MAX_OUT) : text });
       }
     }
   }
@@ -147,7 +151,11 @@ export class Session {
     this.status('measuring entropy', 0.16);
     const entropy = await r2.cmdj('p=ej 256 @ 0');
     this.status('harvesting strings', 0.2);
-    const strings = sample((await r2.cmdj<unknown[]>('izj', 30_000)) ?? [], MAX_STRINGS);
+    const strings = sample((await r2.cmdj<{ string?: string }[]>('izj', 30_000)) ?? [], MAX_STRINGS).map((x) => ({
+      ...x,
+      string: x.string && x.string.length > MAX_STRLEN ? x.string.slice(0, MAX_STRLEN) + '…' : x.string,
+    }));
+    const stringAddrs = new Set(strings.map((x) => (x as { vaddr?: number }).vaddr ?? -1));
     this.status('resolving imports', 0.24);
     const imports = (await r2.cmdj<unknown[]>('iij')) ?? [];
     const symbols = sample((await r2.cmdj<unknown[]>('isj')) ?? [], MAX_SYMBOLS);
@@ -175,34 +183,14 @@ export class Session {
     if (this.closed) return;
     this.status('enumerating functions', 0.94);
     const afl = (await r2.cmdj<AflEntry[]>('aflj', 60_000)) ?? [];
-    const functions = afl.map((f) => ({
-      addr: f.addr,
-      name: f.name,
-      size: f.realsz ?? f.size,
-      nbbs: f.nbbs ?? 1,
-      cc: f.cc ?? 1,
-      ninstrs: f.ninstrs ?? 0,
-      indeg: f.indegree ?? 0,
-      outdeg: f.outdegree ?? 0,
-      nargs: f.nargs ?? 0,
-      nlocals: f.nlocals ?? 0,
-      stack: f.stackframe ?? 0,
-      imp: f.name.startsWith('sym.imp.') || f.name.startsWith('imp.'),
-    }));
-    this.status('tracing call graph', 0.97);
-    const cg = (await r2.cmdj<{ name: string; imports?: string[] }[]>('agCj', 60_000)) ?? [];
-    const idx = new Map(functions.map((f, i) => [f.name, i]));
-    const calls: [number, number][] = [];
-    for (const n of cg) {
-      const a = idx.get(n.name);
-      if (a === undefined) continue;
-      for (const callee of n.imports ?? []) {
-        const b = idx.get(callee);
-        if (b !== undefined && b !== a) calls.push([a, b]);
-      }
-    }
+    this.status('mapping basic blocks', 0.95);
+    const blocks = parseBlocks(await r2.cmd('afbj @@F', 120_000));
+    this.status('tracing cross-references', 0.97);
+    const xrefs = (await r2.cmdj<XrefEntry[]>('axlj', 120_000)) ?? [];
+    const g = buildGraph(afl, blocks, xrefs, stringAddrs);
+    console.log(`[r3] ${bin.path}: ${g.functions.length} fns, ${g.calls.length} call sites, ${g.strRefs.length} string refs, attribution`, g.stats);
     const seek = parseInt((await r2.cmd('s')).trim(), 16);
-    this.send({ t: 'functions', functions, calls, seek });
+    this.send({ t: 'functions', functions: g.functions, calls: g.calls, strRefs: g.strRefs, seek });
     this.status('online', 1);
   }
 }

@@ -86,12 +86,19 @@ export interface Fn {
   nlocals: number;
   stack: number;
   imp: boolean;
+  /** lowest / highest address covered by the function's basic blocks */
+  min: number;
+  max: number;
+  sig: string;
 }
 
 export interface FunctionsMsg {
   t: 'functions';
   functions: Fn[];
-  calls: [number, number][];
+  /** exact call sites: [callerIdx, calleeIdx, siteAddr] */
+  calls: [number, number, number][];
+  /** string references: [fnIdx, siteAddr, stringVaddr] */
+  strRefs: [number, number, number][];
   seek: number | null;
 }
 
@@ -106,6 +113,32 @@ export interface Op {
   fail?: number;
   flags?: string[];
   comment?: string;
+  refs?: { addr: number; type: string }[];
+  xrefs?: { addr: number; type: string }[];
+  ptr?: number;
+  val?: number;
+}
+
+export interface InspectMsg {
+  info: {
+    name: string;
+    addr: number;
+    size: number;
+    realsz?: number;
+    cc: number;
+    nbbs: number;
+    ninstrs: number;
+    edges: number;
+    stackframe: number;
+    signature?: string;
+    nargs: number;
+    nlocals: number;
+    calltype?: string;
+    minaddr?: number;
+    maxaddr?: number;
+  } | null;
+  vars: { reg?: { name: string; type: string; ref?: unknown }[]; stack?: { name: string; type: string; ref?: { base?: string; offset?: number } }[]; bp?: unknown[]; sp?: unknown[] } | null;
+  ops: Op[];
 }
 
 export interface Block {

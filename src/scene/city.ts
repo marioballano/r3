@@ -45,6 +45,9 @@ export class City {
   radius = 60;
   labels: LabelField | null = null;
   private aHi: THREE.InstancedBufferAttribute;
+  private aRole: THREE.InstancedBufferAttribute;
+  /** fn index -> tower index */
+  byFn = new Map<number, number>();
   private sorted: Tower[];
   private sweepT = -1;
   private growT = 0;
@@ -123,6 +126,10 @@ export class City {
     this.aHi = new THREE.InstancedBufferAttribute(hi, 1);
     this.aHi.setUsage(THREE.DynamicDrawUsage);
     geo.setAttribute('aHi', this.aHi);
+    this.aRole = new THREE.InstancedBufferAttribute(new Float32Array(count), 1);
+    this.aRole.setUsage(THREE.DynamicDrawUsage);
+    geo.setAttribute('aRole', this.aRole);
+    this.towers.forEach((t, i) => this.byFn.set(t.fnIndex, i));
 
     this.material = new THREE.ShaderMaterial({
       uniforms: {
@@ -138,6 +145,8 @@ export class City {
         attribute vec3 aSize;
         attribute vec2 aSeed;
         attribute float aHi;
+        attribute float aRole;
+        varying float vRole;
         varying vec3 vLocal;
         varying vec3 vN;
         varying vec3 vSize;
@@ -158,6 +167,7 @@ export class City {
           vSize = aSize;
           vColor = aColor;
           vHi = aHi;
+          vRole = aRole;
           vSeed = aSeed.x;
           vec4 w = modelMatrix * instanceMatrix * vec4(p, 1.0);
           vWorld = w.xyz;
@@ -181,6 +191,7 @@ export class City {
         varying float vSeed;
         varying float vDist;
         varying float vGrow;
+        varying float vRole;
         void main() {
           vec3 n = normalize(vN);
           bool top = n.y > 0.5;
@@ -209,18 +220,22 @@ export class City {
           float scan = mod(uTime * (6.0 + vSeed * 10.0) + vSeed * 300.0, vSize.y + 30.0);
           float band = exp(-pow((y - scan) / 0.7, 2.0));
 
-          float focus = vHi < -0.5 ? 0.22 : 1.0;
+          float focus = vHi < -0.5 ? 0.16 : 1.0;
           float hi = max(vHi, 0.0);
+          // role tint in focus mode: callers cyan, callees magenta, both white
+          vec3 base = vColor;
+          if (vRole > 0.5) base = vRole < 1.5 ? vec3(0.05, 0.95, 1.0) : vRole < 2.5 ? vec3(1.0, 0.18, 0.85) : vec3(1.0, 0.95, 0.8);
+          vec3 tint = base;
 
-          vec3 col = vColor * 0.035 + vec3(0.008, 0.004, 0.02);
-          col += vColor * 0.06 * smoothstep(0.0, 1.0, vLocal.y);
-          col += vColor * edge * (1.5 + hi * 2.5);
-          col += mix(vColor, vec3(1.0), 0.25) * win * lit * 0.85;
-          col += vColor * band * 1.4 * (1.0 - float(top));
-          if (top) col += vColor * (0.5 + 0.35 * sin(uTime * 2.0 + vSeed * 20.0));
+          vec3 col = tint * 0.035 + vec3(0.008, 0.004, 0.02);
+          col += tint * 0.06 * smoothstep(0.0, 1.0, vLocal.y);
+          col += tint * edge * (1.5 + hi * 2.5);
+          col += mix(tint, vec3(1.0), 0.25) * win * lit * 0.85;
+          col += tint * band * 1.4 * (1.0 - float(top));
+          if (top) col += tint * (0.5 + 0.35 * sin(uTime * 2.0 + vSeed * 20.0));
           vec3 V = normalize(cameraPosition - vWorld);
           float fr = pow(1.0 - abs(dot(V, n)), 3.0);
-          col += vColor * fr * 0.3;
+          col += tint * fr * 0.3;
 
           col *= focus;
           col *= 1.0 + hi * (0.8 + 0.5 * sin(uTime * 7.0));
@@ -228,10 +243,10 @@ export class City {
 
           // radial sweep
           float sw = uSweep > 0.0 && uSweep < 1.0 ? exp(-pow((length(vWorld.xz) / uCityR - (uSweep * 1.3 - 0.15)) * 9.0, 2.0)) : 0.0;
-          col += mix(vColor, vec3(1.0), 0.5) * sw * 2.0;
+          col += mix(tint, vec3(1.0), 0.5) * sw * 2.0;
 
           // materialisation shimmer while growing
-          col += vColor * (1.0 - vGrow) * 2.0 * step(0.5, h21(vec2(floor(y * 3.0), floor(uTime * 20.0))));
+          col += tint * (1.0 - vGrow) * 2.0 * step(0.5, h21(vec2(floor(y * 3.0), floor(uTime * 20.0))));
 
           col = applyFog(col, vDist);
           gl_FragColor = vec4(col, 1.0);
@@ -330,12 +345,37 @@ export class City {
     return new THREE.Vector3(t.pos.x, t.height, t.pos.z);
   }
 
-  /** hi: -1 dim, 0 normal, 1 related, 2 selected */
-  setStates(states: Map<number, number> | null) {
+  /** hi: -1 dim, 0 normal, 0..1 related, 2 selected (keys are tower indices); role 1 caller 2 callee 3 both */
+  setStates(states: Map<number, number> | null, roles?: Map<number, number>) {
     const arr = this.aHi.array as Float32Array;
     arr.fill(states ? -1 : 0);
     if (states) for (const [i, v] of states) arr[i] = v;
     this.aHi.needsUpdate = true;
+    const r = this.aRole.array as Float32Array;
+    r.fill(0);
+    if (roles) for (const [i, v] of roles) r[i] = v;
+    this.aRole.needsUpdate = true;
+  }
+
+  towerOfFn(fi: number): Tower | null {
+    const i = this.byFn.get(fi);
+    return i === undefined ? null : this.towers[i];
+  }
+
+  /**
+   * A tower's vertical axis is its function's address range: the entry is the roof,
+   * later code is further down. `frac` 0 = entry, 1 = last byte.
+   */
+  floor(t: Tower, frac: number, side = 0): THREE.Vector3 {
+    const y = Math.max(0.4, t.height * (1 - frac * 0.97));
+    const p = new THREE.Vector3(t.pos.x, y, t.pos.z);
+    if (side) p.x += (t.width / 2) * side;
+    return p;
+  }
+
+  /** Inverse of floor(): address fraction at a world height on a tower. */
+  fracAtY(t: Tower, y: number) {
+    return Math.max(0, Math.min(1, (1 - y / t.height) / 0.97));
   }
 
   sweep() {

@@ -12,5 +12,9 @@ export default defineConfig({
     },
   },
   build: { chunkSizeWarningLimit: 2000, target: 'es2022' },
+  // pre-bundle deps only reached from the CFG layout worker, so the dev server never
+  // discovers them lazily (which would force a full page reload mid-session)
+  optimizeDeps: { include: ['@dagrejs/dagre', 'three', 'gsap', 'postprocessing', '@xterm/xterm', '@xterm/addon-fit'] },
+  worker: { format: 'es' },
   assetsInclude: ['**/*.glsl'],
 });

@@ -1,87 +1,101 @@
 import * as THREE from 'three';
+import type { Model } from '../model';
 import { globals } from '../shaders/common';
 
+export interface NodeGeom {
+  /** world position of an address inside a function (its "floor"), or null if not placed */
+  site(fi: number, addr: number): THREE.Vector3 | null;
+  /** where calls into a function land (its entry / roof) */
+  entry(fi: number): THREE.Vector3 | null;
+  color(fi: number): THREE.Color;
+}
+
+const CALLER_COL = new THREE.Color(0x13d9ff);
+const CALLEE_COL = new THREE.Color(0xff2bd6);
+const IMPORT_COL = new THREE.Color(0xffc23a);
+
+/** Render layer for heavy translucent geometry that the ground reflection should skip. */
+export const NO_REFLECT_LAYER = 2;
+
 /**
- * Call graph as luminous bezier arcs. Each arc is a polyline with a per-vertex
- * parameter t (0 caller -> 1 callee); the shader runs energy pulses along it.
+ * The ambient global call graph: one arc per distinct caller→callee pair, leaving the
+ * caller at the median height of its real call sites and landing on the callee's roof.
+ * Rendered as cheap 1px GL lines with travelling pulses (fat ribbons are reserved for
+ * the subgraph being inspected).
  */
-export class CallArcs {
+export class CityArcs {
   mesh: THREE.LineSegments;
   material: THREE.ShaderMaterial;
-  edges: [number, number][];
+  pairs: { caller: number; callee: number; sites: number[] }[] = [];
 
-  constructor(edges: [number, number][], nodePos: (fnIndex: number) => THREE.Vector3 | null, colorOf: (fnIndex: number) => THREE.Color, maxEdges = 12000) {
-    const SEG = 18;
-    const kept: [number, number][] = [];
-    for (const e of edges) {
-      if (kept.length >= maxEdges) break;
-      if (nodePos(e[0]) && nodePos(e[1])) kept.push(e);
+  constructor(model: Model, geom: NodeGeom, max = 30000) {
+    const byPair = new Map<string, { caller: number; callee: number; sites: number[] }>();
+    for (const list of model.out) {
+      for (const c of list) {
+        if (c.caller === c.callee) continue;
+        const k = `${c.caller}>${c.callee}`;
+        const p = byPair.get(k) ?? byPair.set(k, { caller: c.caller, callee: c.callee, sites: [] }).get(k)!;
+        p.sites.push(c.site);
+      }
     }
-    this.edges = kept;
-    const nv = kept.length * SEG * 2;
+    this.pairs = [...byPair.values()].slice(0, max);
+    const SEG = this.pairs.length > 6000 ? 12 : 18;
+    const nv = this.pairs.length * SEG * 2;
     const pos = new Float32Array(nv * 3);
     const t = new Float32Array(nv);
     const col = new Float32Array(nv * 3);
-    const ends = new Float32Array(nv * 2);
     const seed = new Float32Array(nv);
-    const a = new THREE.Vector3();
-    const b = new THREE.Vector3();
-    const c = new THREE.Vector3();
-    const p = new THREE.Vector3();
-    const curve = new THREE.QuadraticBezierCurve3(a, c, b);
     const ca = new THREE.Color();
+    const p = new THREE.Vector3();
     let v = 0;
-    kept.forEach(([from, to]) => {
-      a.copy(nodePos(from)!);
-      b.copy(nodePos(to)!);
+    for (const pr of this.pairs) {
+      const med = pr.sites[Math.floor(pr.sites.length / 2)];
+      const a = geom.site(pr.caller, med);
+      const b = geom.entry(pr.callee);
+      if (!a || !b) continue;
       const d = a.distanceTo(b);
-      c.addVectors(a, b).multiplyScalar(0.5);
-      c.y = Math.max(a.y, b.y) + 6 + d * 0.45;
+      const c = a.clone().add(b).multiplyScalar(0.5);
+      c.y = Math.max(a.y, b.y) + 6 + d * 0.42;
+      const curve = new THREE.QuadraticBezierCurve3(a, c, b);
+      // direction-coded: leaves the caller cyan, arrives at the callee magenta
+      const c0 = CALLER_COL;
+      const c1 = model.fns[pr.callee]?.imp ? IMPORT_COL : CALLEE_COL;
       const s = Math.random();
-      const c0 = colorOf(from);
-      const c1 = colorOf(to);
+      const w = Math.min(1, 0.45 + Math.log2(1 + pr.sites.length) * 0.25);
       for (let i = 0; i < SEG; i++) {
         for (const k of [i, i + 1]) {
           const u = k / SEG;
           curve.getPoint(u, p);
           pos.set([p.x, p.y, p.z], v * 3);
           t[v] = u;
-          ca.copy(c0).lerp(c1, u);
+          ca.copy(c0).lerp(c1, u).multiplyScalar(w);
           col.set([ca.r, ca.g, ca.b], v * 3);
-          ends[v * 2] = from;
-          ends[v * 2 + 1] = to;
           seed[v] = s;
           v++;
         }
       }
-    });
+    }
     const geo = new THREE.BufferGeometry();
-    geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-    geo.setAttribute('aT', new THREE.BufferAttribute(t, 1));
-    geo.setAttribute('aColor', new THREE.BufferAttribute(col, 3));
-    geo.setAttribute('aEnds', new THREE.BufferAttribute(ends, 2));
-    geo.setAttribute('aSeed', new THREE.BufferAttribute(seed, 1));
+    geo.setAttribute('position', new THREE.BufferAttribute(pos.subarray(0, v * 3), 3));
+    geo.setAttribute('aT', new THREE.BufferAttribute(t.subarray(0, v), 1));
+    geo.setAttribute('aColor', new THREE.BufferAttribute(col.subarray(0, v * 3), 3));
+    geo.setAttribute('aSeed', new THREE.BufferAttribute(seed.subarray(0, v), 1));
+    const dense = this.pairs.length > 3000;
     this.material = new THREE.ShaderMaterial({
       transparent: true,
       depthWrite: false,
       blending: THREE.AdditiveBlending,
-      uniforms: { ...globals, uSel: { value: -1 }, uBase: { value: Math.min(0.08, 0.08 * Math.sqrt(1500 / Math.max(1, kept.length))) }, uReveal: { value: 0 }, uFlow: { value: 1 } },
+      uniforms: { ...globals, uBase: { value: dense ? 0.035 : 0.07 }, uDim: { value: 0 }, uReveal: { value: 1 } },
       vertexShader: /* glsl */ `
         attribute float aT;
         attribute vec3 aColor;
-        attribute vec2 aEnds;
         attribute float aSeed;
-        uniform float uSel;
         varying float vT;
         varying vec3 vColor;
         varying float vSeed;
-        varying float vRole;
         varying float vDist;
         void main() {
-          vT = aT;
-          vColor = aColor;
-          vSeed = aSeed;
-          vRole = uSel < 0.0 ? 0.0 : (abs(aEnds.x - uSel) < 0.5 ? 1.0 : (abs(aEnds.y - uSel) < 0.5 ? 2.0 : -1.0));
+          vT = aT; vColor = aColor; vSeed = aSeed;
           vec4 mv = modelViewMatrix * vec4(position, 1.0);
           vDist = -mv.z;
           gl_Position = projectionMatrix * mv;
@@ -89,36 +103,29 @@ export class CallArcs {
       fragmentShader: /* glsl */ `
         uniform float uTime;
         uniform float uBase;
+        uniform float uDim;
         uniform float uReveal;
-        uniform float uFlow;
         uniform float uFogDensity;
         varying float vT;
         varying vec3 vColor;
         varying float vSeed;
-        varying float vRole;
         varying float vDist;
         void main() {
-          if (vT > uReveal + vSeed * 0.0001) discard;
-          float ph = fract(vT * 1.0 - uTime * (0.25 + vSeed * 0.35) * uFlow + vSeed * 10.0);
-          float pulse = smoothstep(0.92, 1.0, ph) * 1.0;
-          vec3 c = vColor;
-          float a = uBase + pulse * 0.6;
-          if (vRole > 0.5) {
-            c = vRole < 1.5 ? vec3(1.0, 0.25, 0.9) : vec3(0.1, 0.95, 1.0);
-            a = 0.55 + pulse * 2.5;
-          } else if (vRole < -0.5) {
-            a *= 0.12;
-          }
+          if (vT > uReveal * (0.6 + vSeed * 0.4) * 1.7) discard;
+          float ph = fract(vT - uTime * (0.22 + vSeed * 0.3) + vSeed * 10.0);
+          float pulse = smoothstep(0.9, 1.0, ph);
+          float a = (uBase + pulse * 0.5) * mix(1.0, 0.08, uDim);
           float fog = exp(-uFogDensity * uFogDensity * vDist * vDist * 0.5);
-          gl_FragColor = vec4(c * (1.2 + pulse * 2.0), a * fog);
+          gl_FragColor = vec4(vColor * (0.9 + pulse * 2.2), a * fog);
         }`,
     });
     this.mesh = new THREE.LineSegments(geo, this.material);
     this.mesh.frustumCulled = false;
+    this.mesh.layers.set(NO_REFLECT_LAYER);
   }
 
-  select(fnIndex: number) {
-    this.material.uniforms.uSel.value = fnIndex;
+  setDim(v: number) {
+    this.material.uniforms.uDim.value = v;
   }
 
   dispose() {

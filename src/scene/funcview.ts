@@ -2,15 +2,27 @@ import * as THREE from 'three';
 import { FOG_PARS, globals, PALETTE } from '../shaders/common';
 import { hex, type Block, type FnGraph, type Op } from '../types';
 import { LabelField } from './labels';
+import { Ribbons, type RibbonSpec } from './ribbons';
+import type { LayoutReq, LayoutRes } from './cfg.worker';
 
 const FONT_PX = 22;
 const LINE_H = 30;
 const PAD_X = 16;
 const HEADER_H = 40;
 const PX_PER_UNIT = 40;
-const MAX_LINES = 32;
+const MAX_LINES = 40;
+const MAX_DETAIL = 90; // crisp text textures alive at once
+const CHAR_W = FONT_PX * 0.6; // JetBrains Mono advance
 
-const opColor = (t?: string): string => {
+export type EdgeKind = 'jump' | 'fail' | 'uncond' | 'case';
+export const EDGE_COLORS: Record<EdgeKind, THREE.Color> = {
+  jump: new THREE.Color(0x39ff88),
+  fail: new THREE.Color(0xff3864),
+  uncond: new THREE.Color(0x2fd8ff),
+  case: new THREE.Color(0xffe14d),
+};
+
+export const opColor = (t?: string): string => {
   if (!t) return '#d8f6ff';
   if (t.includes('call')) return '#ff4fe0';
   if (t === 'ret') return '#ff4870';
@@ -24,228 +36,196 @@ const opColor = (t?: string): string => {
   return '#d8f6ff';
 };
 
-interface Panel {
-  block: Block;
-  mesh: THREE.Mesh;
-  w: number;
-  h: number;
-  layer: number;
-  rows: { addr: number; y0: number; y1: number }[];
-  pxH: number;
+interface Line {
+  op?: Op;
+  segs: [string, string][];
 }
 
-/** A function's control-flow graph as floating holographic glass panels. */
+export interface Panel {
+  block: Block;
+  mesh: THREE.Mesh;
+  mat: THREE.ShaderMaterial;
+  w: number;
+  h: number;
+  pxW: number;
+  pxH: number;
+  lines: Line[];
+  rows: { addr: number; y0: number; y1: number }[];
+  detail: THREE.CanvasTexture | null;
+  lastUsed: number;
+  index: number;
+}
+
+export interface Edge {
+  from: number;
+  to: number;
+  kind: EdgeKind;
+}
+
+/** A function's control-flow graph: dagre-laid-out glass panels with LOD text. */
 export class FuncView {
   group = new THREE.Group();
   graph: FnGraph;
   panels: Panel[] = [];
-  private panelByAddr = new Map<number, Panel>();
-  private edgeMeshes: THREE.Mesh[] = [];
-  private title: LabelField;
-  private backdrop: THREE.Mesh;
+  edges: Edge[] = [];
+  private byAddr = new Map<number, Panel>();
+  private edgeRibbons: Ribbons | null = null;
+  private arrows: THREE.InstancedMesh | null = null;
+  private title: LabelField | null = null;
+  private backdrop: THREE.Mesh | null = null;
+  private barTex: THREE.DataTexture;
   bounds = new THREE.Box3();
-  helix = false;
-  private hoverPanel: Panel | null = null;
   private seekPanel: Panel | null = null;
+  private hoverPanel: Panel | null = null;
+  private rowHover: Panel | null = null;
+  private frame = 0;
+  ready: Promise<void>;
+  layoutMs = 0;
 
   constructor(graph: FnGraph) {
     this.graph = graph;
     const blocks = graph.blocks ?? [];
-    const byAddr = new Map(blocks.map((b) => [b.addr, b]));
-    const succ = (b: Block) => {
-      const s: { to: number; kind: 'jump' | 'fail' | 'uncond' | 'case' }[] = [];
+    const has = new Set(blocks.map((b) => b.addr));
+    for (const b of blocks) {
       const cond = b.fail !== undefined && b.jump !== undefined;
-      if (b.jump !== undefined && byAddr.has(b.jump)) s.push({ to: b.jump, kind: cond ? 'jump' : 'uncond' });
-      if (b.fail !== undefined && byAddr.has(b.fail)) s.push({ to: b.fail, kind: 'fail' });
-      for (const c of b.switchop?.cases ?? []) if (byAddr.has(c.jump)) s.push({ to: c.jump, kind: 'case' });
-      return s;
-    };
-
-    // ---- layering: DFS to find back edges, then longest-path layering
-    const entry = byAddr.has(graph.addr) ? graph.addr : blocks[0]?.addr;
-    const state = new Map<number, number>();
-    const back = new Set<string>();
-    const order: number[] = [];
-    const dfs = (start: number) => {
-      const stack: [number, number][] = [[start, 0]];
-      state.set(start, 1);
-      while (stack.length) {
-        const top = stack[stack.length - 1];
-        const ss = succ(byAddr.get(top[0])!);
-        if (top[1] < ss.length) {
-          const nx = ss[top[1]++].to;
-          const st = state.get(nx) ?? 0;
-          if (st === 1) back.add(`${top[0]}>${nx}`);
-          else if (st === 0) {
-            state.set(nx, 1);
-            stack.push([nx, 0]);
-          }
-        } else {
-          state.set(top[0], 2);
-          order.push(top[0]);
-          stack.pop();
-        }
-      }
-    };
-    if (entry !== undefined) dfs(entry);
-    for (const b of blocks) if (!state.has(b.addr)) dfs(b.addr);
-    order.reverse();
-    const layer = new Map<number, number>();
-    for (const a of order) if (!layer.has(a)) layer.set(a, 0);
-    for (const a of order) {
-      const l = layer.get(a)!;
-      for (const s of succ(byAddr.get(a)!)) {
-        if (back.has(`${a}>${s.to}`)) continue;
-        layer.set(s.to, Math.max(layer.get(s.to) ?? 0, l + 1));
-      }
+      if (b.jump !== undefined && has.has(b.jump)) this.edges.push({ from: b.addr, to: b.jump, kind: cond ? 'jump' : 'uncond' });
+      if (b.fail !== undefined && has.has(b.fail)) this.edges.push({ from: b.addr, to: b.fail, kind: 'fail' });
+      for (const c of b.switchop?.cases ?? []) if (has.has(c.jump)) this.edges.push({ from: b.addr, to: c.jump, kind: 'case' });
     }
 
-    // ---- panels
-    const layers: Panel[][] = [];
-    for (const b of blocks) {
-      const p = this.makePanel(b, graph);
-      p.layer = layer.get(b.addr) ?? 0;
-      (layers[p.layer] ??= []).push(p);
+    // text lines + sizes (no rasterisation yet)
+    let totalRows = 0;
+    blocks.forEach((b, i) => {
+      const lines = this.linesOf(b, graph);
+      const maxChars = Math.max(30, ...lines.map((l) => l.segs.reduce((s, x) => s + x[0].length, 0)));
+      const pxW = Math.ceil(maxChars * CHAR_W + PAD_X * 2);
+      const pxH = HEADER_H + lines.length * LINE_H + 14;
+      const rows: Panel['rows'] = [];
+      lines.forEach((l, k) => l.op && rows.push({ addr: l.op.addr, y0: HEADER_H + k * LINE_H + 4, y1: HEADER_H + (k + 1) * LINE_H + 4 }));
+      const p: Panel = { block: b, mesh: null!, mat: null!, w: pxW / PX_PER_UNIT, h: pxH / PX_PER_UNIT, pxW, pxH, lines, rows, detail: null, lastUsed: 0, index: i };
+      totalRows += lines.length;
       this.panels.push(p);
-      this.panelByAddr.set(b.addr, p);
-    }
-    // order within layers by barycentre of predecessors
-    const xOf = new Map<Panel, number>();
-    const preds = new Map<number, number[]>();
-    for (const b of blocks) for (const s of succ(b)) (preds.get(s.to) ?? preds.set(s.to, []).get(s.to)!).push(b.addr);
-    const GAP_X = 4;
-    const GAP_Y = 7;
-    // Big graphs wrap their layers around a helix (a DNA-like tower); small ones stay planar.
-    const nLayers = layers.filter(Boolean).length;
-    this.helix = nLayers > 22;
-    const rowWidth = (row: Panel[]) => row.reduce((s, p) => s + p.w, 0) + GAP_X * (row.length - 1);
-    const maxRow = Math.max(10, ...layers.filter(Boolean).map(rowWidth));
-    const widths = this.panels.map((p) => p.w).sort((a, b) => a - b);
-    const medW = widths[Math.floor(widths.length / 2)] ?? 12;
-    const helixR = Math.max(30, Math.min(90, medW * 3.2, maxRow * 0.6));
-    const turn = 0.42; // radians per layer
-    let y = 0;
-    layers.forEach((row, li) => {
-      if (!row) return;
-      if (li > 0) {
-        const bary = (p: Panel) => {
-          const ps = (preds.get(p.block.addr) ?? []).map((a) => this.panelByAddr.get(a)).filter((q): q is Panel => !!q && xOf.has(q));
-          return ps.length ? ps.reduce((s, q) => s + xOf.get(q)!, 0) / ps.length : 0;
-        };
-        row.sort((a, b) => bary(a) - bary(b));
-      }
-      const total = rowWidth(row);
-      let x = -total / 2;
-      let maxH = 0;
-      const a = li * turn;
-      for (const p of row) {
-        const cx = x + p.w / 2;
-        xOf.set(p, cx);
-        if (this.helix) {
-          // tangent offset along the circle, facing outward
-          const ang = a + cx / helixR;
-          p.mesh.position.set(Math.sin(ang) * helixR, y - p.h / 2, Math.cos(ang) * helixR);
-          p.mesh.rotation.y = ang;
-        } else {
-          p.mesh.position.set(cx, y - p.h / 2, Math.sin(li * 0.7) * 5 + Math.cos(cx * 0.05) * 2);
-        }
-        x += p.w + GAP_X;
-        maxH = Math.max(maxH, p.h);
-      }
-      y -= this.helix ? maxH * 0.55 + 4 : maxH + GAP_Y;
+      this.byAddr.set(b.addr, p);
     });
+
+    // shared "barcode" texture: one texel per line (colour + line length) for far LOD
+    // 2D layout (256 texels per row) so huge functions never exceed max texture height
+    const BW = 256;
+    const H = Math.max(1, Math.ceil(Math.max(1, totalRows) / BW));
+    const data = new Uint8Array(BW * H * 4);
+    let r = 0;
+    const tmp = new THREE.Color();
+    const rowStart: number[] = [];
     for (const p of this.panels) {
-      this.group.add(p.mesh);
-      p.mesh.updateMatrixWorld(true);
-      for (const [sx, sy] of [[-1, -1], [1, -1], [-1, 1], [1, 1]]) this.bounds.expandByPoint(p.mesh.localToWorld(new THREE.Vector3((sx * p.w) / 2, (sy * p.h) / 2, 0)));
+      rowStart.push(r);
+      for (const l of p.lines) {
+        tmp.set(l.op ? opColor(l.op.type) : '#fff36b');
+        const len = l.segs.reduce((s, x) => s + x[0].trimEnd().length, 0) * CHAR_W + PAD_X;
+        data.set([tmp.r * 255, tmp.g * 255, tmp.b * 255, Math.min(255, (len / p.pxW) * 255)], r * 4);
+        r++;
+      }
     }
-    if (this.helix) {
-      // a luminous spine down the helix axis
-      const spineGeo = new THREE.CylinderGeometry(0.6, 0.6, this.bounds.max.y - this.bounds.min.y + 40, 12, 1, true);
-      const spine = new THREE.Mesh(
-        spineGeo,
-        new THREE.ShaderMaterial({
-          transparent: true,
-          depthWrite: false,
-          blending: THREE.AdditiveBlending,
-          uniforms: { ...globals },
-          vertexShader: `varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }`,
-          fragmentShader: `uniform float uTime; varying vec2 vUv; void main(){ float p = smoothstep(0.9, 1.0, fract(vUv.y * 12.0 + uTime * 0.4)); gl_FragColor = vec4(vec3(1.0, 0.2, 0.9) * (1.0 + p * 4.0), 0.35 + p * 0.6); }`,
-        }),
-      );
-      spine.position.y = (this.bounds.max.y + this.bounds.min.y) / 2;
-      this.group.add(spine);
-    }
+    this.barTex = new THREE.DataTexture(data, BW, H, THREE.RGBAFormat);
+    this.barTex.needsUpdate = true;
 
-    // ---- edges
-    for (const b of blocks) {
-      const from = this.panelByAddr.get(b.addr)!;
-      const ss = succ(b);
-      ss.forEach((s, k) => {
-        const to = this.panelByAddr.get(s.to);
-        if (!to) return;
-        const isBack = back.has(`${b.addr}>${s.to}`) || to.layer <= from.layer;
-        const color =
-          s.kind === 'jump' ? PALETTE.green : s.kind === 'fail' ? PALETTE.red : s.kind === 'case' ? PALETTE.yellow : PALETTE.cyan;
-        this.addEdge(from, to, color, isBack, ss.length > 1 ? (k / (ss.length - 1) - 0.5) * Math.min(from.w * 0.6, 6) : 0);
-      });
-    }
-
-    // ---- title + backdrop
-    const top = this.bounds.max.y;
-    const bwid = Math.min(120, this.bounds.max.x - this.bounds.min.x);
-    const ts = Math.max(2.2, Math.min(9, bwid * 0.12));
-    this.title = new LabelField(
-      [
-        { text: graph.name, color: PALETTE.magenta, position: new THREE.Vector3(0, top + ts * 1.9, 0), size: ts, font: `700 40px "Orbitron", sans-serif` },
-        {
-          text: `${hex(graph.addr)} · ${graph.blocks?.length ?? 0} blocks · ${graph.ninstr} instrs · ${graph.size} bytes`,
-          color: PALETTE.cyan,
-          position: new THREE.Vector3(0, top + ts * 0.85, 0),
-          size: ts * 0.38,
+    for (const p of this.panels) {
+      const isEntry = p.block.addr === graph.addr;
+      p.mat = new THREE.ShaderMaterial({
+        transparent: true,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+        uniforms: {
+          ...globals,
+          uMap: { value: null },
+          uDetail: { value: 0 },
+          uBar: { value: this.barTex },
+          uBarRows: { value: new THREE.Vector3(rowStart[p.index], p.lines.length, H) },
+          uSize: { value: new THREE.Vector2(p.w, p.h) },
+          uPx: { value: new THREE.Vector2(p.pxW, p.pxH) },
+          uHeader: { value: HEADER_H / p.pxH },
+          uAccent: { value: new THREE.Color(isEntry ? 0xff2bd6 : 0x00e5ff) },
+          uHover: { value: 0 },
+          uSeek: { value: 0 },
+          uRow: { value: new THREE.Vector2(-1, -1) },
+          uRow2: { value: new THREE.Vector2(-1, -1) },
+          uReveal: { value: 0 },
         },
-      ],
-      { fadeFar: 3000, fadeNear: 10, px: 44, shrink: 200 },
-    );
-    this.group.add(this.title.mesh);
-
-    const size = new THREE.Vector3();
-    this.bounds.getSize(size);
-    const bw = Math.max(400, size.x * 3);
-    const bh = Math.max(400, size.y * 3);
-    const bgeo = new THREE.PlaneGeometry(bw, bh);
-    const bmat = new THREE.ShaderMaterial({
-      transparent: true,
-      depthWrite: false,
-      uniforms: { ...globals },
-      vertexShader: `varying vec3 vW; void main(){ vec4 w = modelMatrix * vec4(position,1.0); vW = w.xyz; gl_Position = projectionMatrix * viewMatrix * w; }`,
-      fragmentShader: /* glsl */ `
-        ${FOG_PARS}
-        uniform float uTime;
-        varying vec3 vW;
-        float gl(vec2 p, float s) { vec2 g = abs(fract(p / s - 0.5) - 0.5) * s; vec2 fw = fwidth(p); vec2 l = 1.0 - smoothstep(vec2(0.0), fw * 1.2, g); return max(l.x, l.y); }
-        void main() {
-          vec2 p = vW.xy;
-          float g = gl(p, 4.0) * 0.12 + gl(p, 32.0) * 0.5;
-          float scan = exp(-pow(mod(p.y + uTime * 22.0, 160.0) - 80.0, 2.0) / 40.0);
-          vec3 c = vec3(0.25, 0.05, 0.6) * g + vec3(0.0, 0.8, 1.0) * scan * g * 2.0;
-          gl_FragColor = vec4(c, 0.9 * exp(-length(vW.xy) * 0.0025));
-        }`,
-    });
-    this.backdrop = new THREE.Mesh(bgeo, bmat);
-    const center = new THREE.Vector3();
-    this.bounds.getCenter(center);
-    this.backdrop.position.set(center.x, center.y, this.bounds.min.z - 60);
-    this.backdrop.visible = !this.helix;
-    this.group.add(this.backdrop);
+        vertexShader: /* glsl */ `
+          varying vec2 vUv;
+          varying float vDist;
+          void main() { vUv = uv; vec4 mv = modelViewMatrix * vec4(position, 1.0); vDist = -mv.z; gl_Position = projectionMatrix * mv; }`,
+        fragmentShader: /* glsl */ `
+          ${FOG_PARS}
+          uniform sampler2D uMap;
+          uniform sampler2D uBar;
+          uniform float uDetail;
+          uniform vec3 uBarRows;
+          uniform vec2 uSize;
+          uniform vec2 uPx;
+          uniform float uHeader;
+          uniform vec3 uAccent;
+          uniform float uHover;
+          uniform float uSeek;
+          uniform vec2 uRow;
+          uniform vec2 uRow2;
+          uniform float uTime;
+          uniform float uReveal;
+          varying vec2 vUv;
+          varying float vDist;
+          void main() {
+            float yTop = 1.0 - vUv.y;
+            if (yTop > uReveal) discard;
+            vec2 w = vUv * uSize;
+            vec2 e = min(w, uSize - w);
+            float ed = min(e.x, e.y);
+            float border = 1.0 - smoothstep(0.0, 0.06, ed);
+            float glow = exp(-ed * 2.4) * 0.3;
+            float corner = step(e.x, 1.0) * step(e.y, 1.0) * (1.0 - smoothstep(0.08, 0.16, ed));
+            vec3 bg = mix(vec3(0.035, 0.012, 0.085), vec3(0.012, 0.02, 0.05), vUv.y);
+            float header = step(yTop, uHeader);
+            bg += uAccent * header * 0.13;
+            bg += uAccent * (1.0 - smoothstep(0.0, 0.004, abs(yTop - uHeader))) * 0.8;
+            bg *= 0.88 + 0.12 * sin(w.y * 40.0);
+            float row = step(uRow.x, yTop) * step(yTop, uRow.y);
+            float row2 = step(uRow2.x, yTop) * step(yTop, uRow2.y);
+            bg += vec3(1.0, 0.85, 0.1) * row * (0.26 + 0.06 * sin(uTime * 6.0));
+            bg += vec3(1.0, 0.9, 0.2) * row * step(vUv.x, 0.012) * 3.0;
+            bg += vec3(0.2, 0.9, 1.0) * row2 * 0.18;
+            vec3 text = vec3(0.0);
+            if (uDetail > 0.5) {
+              vec4 t = texture2D(uMap, vUv);
+              text = t.rgb * t.a * 0.85;
+            } else if (yTop > uHeader) {
+              // far LOD: one bar per instruction, coloured by instruction class
+              float py = yTop * uPx.y - ${HEADER_H.toFixed(1)} - 4.0;
+              float r = floor(py / ${LINE_H.toFixed(1)});
+              float fy = fract(py / ${LINE_H.toFixed(1)});
+              if (r >= 0.0 && r < uBarRows.y) {
+                float idx = uBarRows.x + r;
+                vec4 b = texture2D(uBar, vec2((mod(idx, 256.0) + 0.5) / 256.0, (floor(idx / 256.0) + 0.5) / uBarRows.z));
+                float x = vUv.x * uPx.x;
+                float bar = step(${PAD_X.toFixed(1)}, x) * step(x, b.a * uPx.x) * step(0.3, fy) * step(fy, 0.7);
+                text = b.rgb * b.rgb * bar * 0.6;
+              }
+            }
+            float bb = 1.0 + uHover * 1.4 + uSeek * 1.3;
+            vec3 col = bg + text + uAccent * (border * 1.7 + glow + corner * 2.4) * bb;
+            col = applyFog(col, vDist * 0.5);
+            gl_FragColor = vec4(col, 0.82 + border * 0.18);
+          }`,
+      });
+      p.mesh = new THREE.Mesh(new THREE.PlaneGeometry(p.w, p.h), p.mat);
+      p.mesh.userData.panel = p.index;
+      this.group.add(p.mesh);
+    }
+    this.ready = this.layout();
   }
 
-  private makePanel(b: Block, g: FnGraph): Panel {
+  private linesOf(b: Block, g: FnGraph): Line[] {
     const ops = b.ops ?? [];
-    const shown = ops.slice(0, MAX_LINES);
-    const lines: { op?: Op; segs: [string, string][] }[] = [];
-    for (const op of shown) {
-      for (const f of op.flags ?? []) if (f !== 'pc') lines.push({ segs: [[`;-- ${f}:`, '#fff36b']] });
+    const lines: Line[] = [];
+    for (const op of ops.slice(0, MAX_LINES)) {
+      for (const f of op.flags ?? []) if (f !== 'pc' && f !== g.name) lines.push({ segs: [[`;-- ${f}:`, '#fff36b']] });
       const dis = (op.disasm ?? op.opcode ?? '???').trim();
       const sp = dis.indexOf(' ');
       const mnem = sp > 0 ? dis.slice(0, sp) : dis;
@@ -256,37 +236,199 @@ export class FuncView {
           [hex(op.addr), '#7d6aa8'],
           ['  ', '#000'],
           [mnem.padEnd(7), opColor(op.type)],
-          [args.length > 44 ? args.slice(0, 43) + '…' : args, '#d8f6ff'],
+          [args.length > 46 ? args.slice(0, 45) + '…' : args, '#d8f6ff'],
         ],
       });
     }
     if (ops.length > MAX_LINES) lines.push({ segs: [[`  … ${ops.length - MAX_LINES} more instructions`, '#8a7ab0']] });
+    return lines;
+  }
 
-    const meas = document.createElement('canvas').getContext('2d')!;
-    meas.font = `500 ${FONT_PX}px "JetBrains Mono", monospace`;
-    const cw = meas.measureText('M').width;
-    const maxChars = Math.max(30, ...lines.map((l) => l.segs.reduce((s, x) => s + x[0].length, 0)));
-    const pxW = Math.ceil(maxChars * cw + PAD_X * 2);
-    const pxH = HEADER_H + lines.length * LINE_H + 14;
+  private async layout() {
+    const req: LayoutReq = {
+      nodes: this.panels.map((p) => ({ id: String(p.block.addr), w: p.w, h: p.h })),
+      edges: this.edges.map((e, i) => ({ v: String(e.from), w: String(e.to), name: `e${i}`, weight: e.kind === 'fail' ? 3 : e.kind === 'uncond' ? 2 : 1 })),
+    };
+    const res = await new Promise<LayoutRes>((resolve, reject) => {
+      const w = new Worker(new URL('./cfg.worker.ts', import.meta.url), { type: 'module' });
+      w.onmessage = (ev) => {
+        resolve(ev.data);
+        w.terminate();
+      };
+      w.onerror = (e) => {
+        reject(e);
+        w.terminate();
+      };
+      w.postMessage(req);
+    });
+    this.layoutMs = res.ms;
+    // dagre: y grows downward → flip; centre the graph horizontally around x=0
+    const ox = res.width / 2;
+    for (const p of this.panels) {
+      const n = res.nodes[String(p.block.addr)];
+      if (!n) continue;
+      p.mesh.position.set(n.x - ox, -n.y, 0);
+      this.bounds.expandByPoint(new THREE.Vector3(n.x - ox - p.w / 2, -n.y - p.h / 2, 0));
+      this.bounds.expandByPoint(new THREE.Vector3(n.x - ox + p.w / 2, -n.y + p.h / 2, 0));
+    }
+    // edges along dagre's routed polylines, smoothed
+    const specs: RibbonSpec[] = [];
+    const heads: { p: THREE.Vector3; d: THREE.Vector3; c: THREE.Color }[] = [];
+    this.edges.forEach((e, i) => {
+      const pts = res.edges[`e${i}`];
+      if (!pts || pts.length < 2) return;
+      const v = pts.map((q) => new THREE.Vector3(q.x - ox, -q.y, 0.15));
+      const curve = v.length > 2 ? new THREE.CatmullRomCurve3(v, false, 'centripetal', 0.5) : new THREE.LineCurve3(v[0], v[1]);
+      const sampled = curve.getPoints(Math.min(60, 10 + v.length * 6));
+      const c = EDGE_COLORS[e.kind];
+      specs.push({ points: sampled, color0: c, color1: c, width: 2.2, alpha: 0.85, flow: 9, tag: i });
+      const end = sampled[sampled.length - 1];
+      const prev = sampled[Math.max(0, sampled.length - 3)];
+      heads.push({ p: end, d: end.clone().sub(prev).normalize(), c });
+    });
+    this.edgeRibbons = new Ribbons(specs, { pulseSpacing: 9, renderOrder: 2 });
+    this.edgeRibbons.material.uniforms.uReveal.value = 0;
+    this.group.add(this.edgeRibbons.mesh);
+    // arrowheads
+    const cone = new THREE.ConeGeometry(0.42, 1.0, 12);
+    cone.translate(0, -0.5, 0);
+    this.arrows = new THREE.InstancedMesh(cone, new THREE.MeshBasicMaterial({ toneMapped: false }), Math.max(1, heads.length));
+    const m = new THREE.Matrix4();
+    const q = new THREE.Quaternion();
+    heads.forEach((h, i) => {
+      q.setFromUnitVectors(new THREE.Vector3(0, 1, 0), h.d);
+      m.compose(h.p, q, new THREE.Vector3(1, 1, 1));
+      this.arrows!.setMatrixAt(i, m);
+      this.arrows!.setColorAt(i, h.c.clone().multiplyScalar(2.2));
+    });
+    this.arrows.count = heads.length;
+    this.group.add(this.arrows);
+
+    // title + backdrop
+    const top = this.bounds.max.y;
+    const bw = Math.max(1, this.bounds.max.x - this.bounds.min.x);
+    const ts = Math.max(2.2, Math.min(7, bw * 0.08));
+    const g = this.graph;
+    this.title = new LabelField(
+      [
+        { text: g.name, color: PALETTE.magenta, position: new THREE.Vector3(0, top + ts * 1.9, 0), size: ts, font: `700 40px "Orbitron", sans-serif` },
+        { text: `${hex(g.addr)} · ${g.blocks?.length ?? 0} blocks · ${this.edges.length} edges · ${g.ninstr} instrs · ${g.size} bytes`, color: PALETTE.cyan, position: new THREE.Vector3(0, top + ts * 0.85, 0), size: ts * 0.36 },
+      ],
+      { fadeFar: 4000, fadeNear: 4, px: 44, shrink: 160 },
+    );
+    this.group.add(this.title.mesh);
+    const size = new THREE.Vector3();
+    this.bounds.getSize(size);
+    const bgeo = new THREE.PlaneGeometry(Math.max(500, size.x * 3), Math.max(500, size.y * 3));
+    const bmat = new THREE.ShaderMaterial({
+      transparent: true,
+      depthWrite: false,
+      uniforms: { ...globals },
+      vertexShader: `varying vec3 vW; void main(){ vec4 w = modelMatrix * vec4(position,1.0); vW = w.xyz; gl_Position = projectionMatrix * viewMatrix * w; }`,
+      fragmentShader: /* glsl */ `
+        uniform float uTime;
+        varying vec3 vW;
+        float gl(vec2 p, float s) { vec2 g = abs(fract(p / s - 0.5) - 0.5) * s; vec2 fw = fwidth(p); vec2 l = 1.0 - smoothstep(vec2(0.0), fw * 1.2, g); return max(l.x, l.y); }
+        void main() {
+          vec2 p = vW.xy;
+          // fade each grid level out before it gets denser than a few pixels (no aliasing far away)
+          float fw = length(fwidth(p));
+          float minor = gl(p, 4.0) * (1.0 - smoothstep(0.12, 0.5, fw));
+          float major = gl(p, 32.0) * (1.0 - smoothstep(0.7, 2.6, fw));
+          float g = minor * 0.1 + major * 0.4;
+          float scan = exp(-pow(mod(p.y + uTime * 22.0, 160.0) - 80.0, 2.0) / 40.0);
+          vec3 c = vec3(0.25, 0.05, 0.6) * g + vec3(0.0, 0.8, 1.0) * scan * major * 1.2;
+          gl_FragColor = vec4(c, 0.85);
+        }`,
+    });
+    this.backdrop = new THREE.Mesh(bgeo, bmat);
+    const center = new THREE.Vector3();
+    this.bounds.getCenter(center);
+    this.backdrop.position.set(center.x, center.y, -40);
+    this.group.add(this.backdrop);
+  }
+
+  /** Animate panels & edges in (call after `ready`). */
+  reveal(add: (fn: (dt: number) => void) => () => boolean) {
+    let t = 0;
+    const top = this.bounds.max.y;
+    const span = Math.max(1, top - this.bounds.min.y);
+    const off = add((dt) => {
+      t += dt;
+      for (const p of this.panels) {
+        const delay = ((top - p.mesh.position.y) / span) * 1.2;
+        p.mat.uniforms.uReveal.value = Math.min(1, Math.max(0, (t - delay) * 3));
+      }
+      if (this.edgeRibbons) this.edgeRibbons.material.uniforms.uReveal.value = Math.max(0, (t - 0.4) * 60);
+      if (t > 3.8) {
+        if (this.edgeRibbons) this.edgeRibbons.material.uniforms.uReveal.value = 1e9;
+        for (const p of this.panels) p.mat.uniforms.uReveal.value = 1;
+        off();
+      }
+    });
+  }
+
+  // ----------------------------------------------------------------- LOD
+  /** Keep crisp text only on the panels that are big on screen. */
+  updateLod(camera: THREE.PerspectiveCamera) {
+    if (++this.frame % 6) return;
+    const k = window.innerHeight / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)));
+    const v = new THREE.Vector3();
+    const scored: { p: Panel; px: number }[] = [];
+    const frustum = new THREE.Frustum().setFromProjectionMatrix(new THREE.Matrix4().multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse));
+    for (const p of this.panels) {
+      if (!frustum.intersectsObject(p.mesh)) continue;
+      p.mesh.getWorldPosition(v);
+      const d = v.distanceTo(camera.position);
+      const px = (p.h / Math.max(d, 0.1)) * k;
+      if (px > 70) scored.push({ p, px });
+    }
+    scored.sort((a, b) => b.px - a.px);
+    const want = new Set(scored.slice(0, MAX_DETAIL).map((s) => s.p));
+    let created = 0;
+    for (const p of want) {
+      p.lastUsed = this.frame;
+      if (!p.detail && created < 6) {
+        p.detail = this.rasterise(p);
+        p.mat.uniforms.uMap.value = p.detail;
+        p.mat.uniforms.uDetail.value = 1;
+        created++;
+      }
+    }
+    const alive = this.panels.filter((p) => p.detail);
+    if (alive.length > MAX_DETAIL) {
+      alive
+        .filter((p) => !want.has(p))
+        .sort((a, b) => a.lastUsed - b.lastUsed)
+        .slice(0, alive.length - MAX_DETAIL)
+        .forEach((p) => {
+          p.detail?.dispose();
+          p.detail = null;
+          p.mat.uniforms.uMap.value = null;
+          p.mat.uniforms.uDetail.value = 0;
+        });
+    }
+  }
+
+  private rasterise(p: Panel): THREE.CanvasTexture {
+    const scale = 2;
     const cv = document.createElement('canvas');
-    const scale = (g.blocks?.length ?? 0) > 150 ? 1 : 2;
-    cv.width = pxW * scale;
-    cv.height = pxH * scale;
+    cv.width = p.pxW * scale;
+    cv.height = p.pxH * scale;
     const c = cv.getContext('2d')!;
     c.scale(scale, scale);
     c.textBaseline = 'middle';
-    // header
-    const isEntry = b.addr === g.addr;
+    const g = this.graph;
+    const isEntry = p.block.addr === g.addr;
     c.font = `700 ${FONT_PX - 2}px "Orbitron", sans-serif`;
     c.fillStyle = isEntry ? '#ff5be6' : '#5ef2ff';
-    c.fillText(isEntry ? `◆ ${g.name}` : `◇ ${hex(b.addr)}`, PAD_X, HEADER_H / 2 + 2);
+    c.fillText(isEntry ? `◆ ${g.name}` : `◇ ${hex(p.block.addr)}`, PAD_X, HEADER_H / 2 + 2);
     c.font = `500 ${FONT_PX - 6}px "JetBrains Mono", monospace`;
     c.fillStyle = '#8f7fc4';
-    const meta = `${ops.length} ops · ${b.size}B`;
-    c.fillText(meta, pxW - PAD_X - c.measureText(meta).width, HEADER_H / 2 + 2);
-    const rows: Panel['rows'] = [];
+    const meta = `${p.block.ops?.length ?? 0} ops · ${p.block.size}B`;
+    c.fillText(meta, p.pxW - PAD_X - c.measureText(meta).width, HEADER_H / 2 + 2);
     c.font = `500 ${FONT_PX}px "JetBrains Mono", monospace`;
-    lines.forEach((l, i) => {
+    p.lines.forEach((l, i) => {
       const yy = HEADER_H + i * LINE_H + LINE_H / 2 + 4;
       let x = PAD_X;
       for (const [txt, col] of l.segs) {
@@ -294,185 +436,68 @@ export class FuncView {
         c.shadowColor = col;
         c.shadowBlur = 2;
         c.fillText(txt, x, yy);
-        x += txt.length * cw;
+        x += txt.length * CHAR_W;
       }
-      if (l.op) rows.push({ addr: l.op.addr, y0: HEADER_H + i * LINE_H + 4, y1: HEADER_H + (i + 1) * LINE_H + 4 });
     });
     const tex = new THREE.CanvasTexture(cv);
     tex.colorSpace = THREE.SRGBColorSpace;
     tex.anisotropy = 8;
-    const w = pxW / PX_PER_UNIT;
-    const h = pxH / PX_PER_UNIT;
-    const mat = new THREE.ShaderMaterial({
-      transparent: true,
-      depthWrite: false,
-      side: THREE.DoubleSide,
-      uniforms: {
-        ...globals,
-        uMap: { value: tex },
-        uSize: { value: new THREE.Vector2(w, h) },
-        uHeader: { value: HEADER_H / pxH },
-        uAccent: { value: new THREE.Color(isEntry ? 0xff2bd6 : 0x00e5ff) },
-        uHover: { value: 0 },
-        uSeek: { value: 0 },
-        uRow: { value: new THREE.Vector2(-1, -1) },
-        uReveal: { value: 0 },
-      },
-      vertexShader: /* glsl */ `
-        varying vec2 vUv;
-        varying float vDist;
-        void main() { vUv = uv; vec4 mv = modelViewMatrix * vec4(position, 1.0); vDist = -mv.z; gl_Position = projectionMatrix * mv; }`,
-      fragmentShader: /* glsl */ `
-        ${FOG_PARS}
-        uniform sampler2D uMap;
-        uniform vec2 uSize;
-        uniform float uHeader;
-        uniform vec3 uAccent;
-        uniform float uHover;
-        uniform float uSeek;
-        uniform vec2 uRow;
-        uniform float uTime;
-        uniform float uReveal;
-        varying vec2 vUv;
-        varying float vDist;
-        void main() {
-          if (1.0 - vUv.y > uReveal) discard;
-          vec2 w = vUv * uSize;
-          vec2 e = min(w, uSize - w);
-          float ed = min(e.x, e.y);
-          float border = 1.0 - smoothstep(0.0, 0.07, ed);
-          float glow = exp(-ed * 2.2) * 0.35;
-          // corner brackets
-          vec2 ce = min(w, uSize - w);
-          float corner = step(ce.x, 1.2) * step(ce.y, 1.2) * (1.0 - smoothstep(0.08, 0.16, ed));
-          float yTop = 1.0 - vUv.y;
-          vec3 bg = mix(vec3(0.03, 0.01, 0.08), vec3(0.01, 0.02, 0.05), vUv.y);
-          float header = step(yTop, uHeader);
-          bg += uAccent * header * 0.12;
-          bg += uAccent * (1.0 - smoothstep(0.0, 0.004, abs(yTop - uHeader))) * 0.8;
-          // scanlines
-          bg *= 0.85 + 0.15 * sin(w.y * 40.0);
-          float sweep = exp(-pow((yTop - fract(uTime * 0.12 + uSize.x * 0.01)) * 30.0, 2.0)) * 0.12;
-          // highlighted row (current seek)
-          float row = step(uRow.x, yTop) * step(yTop, uRow.y);
-          bg += vec3(1.0, 0.85, 0.1) * row * (0.28 + 0.08 * sin(uTime * 6.0));
-          bg += vec3(1.0, 0.9, 0.2) * row * step(vUv.x, 0.012) * 3.0;
-          vec4 t = texture2D(uMap, vUv);
-          float bb = 1.0 + uHover * 1.5 + uSeek * 1.2;
-          vec3 col = bg + t.rgb * t.a * 0.8 + uAccent * (border * 1.8 + glow + corner * 2.5) * bb + uAccent * sweep;
-          float a = 0.8 + border * 0.2;
-          col = applyFog(col, vDist * 0.5);
-          gl_FragColor = vec4(col, a);
-        }`,
-    });
-    const mesh = new THREE.Mesh(new THREE.PlaneGeometry(w, h), mat);
-    mesh.userData.block = b.addr;
-    return { block: b, mesh, w, h, layer: 0, rows, pxH };
+    return tex;
   }
 
-  private addEdge(from: Panel, to: Panel, color: THREE.Color, isBack: boolean, dx: number) {
-    const a = from.mesh.localToWorld(new THREE.Vector3(dx, -from.h / 2, 0));
-    const b = to.mesh.localToWorld(new THREE.Vector3(0, to.h / 2 + 0.6, 0));
-    const na = new THREE.Vector3(0, 0, 1).applyQuaternion(from.mesh.quaternion);
-    const nb = new THREE.Vector3(0, 0, 1).applyQuaternion(to.mesh.quaternion);
-    let curve: THREE.Curve<THREE.Vector3>;
-    if (!isBack) {
-      const dy = Math.max(3, (a.y - b.y) * 0.5);
-      curve = new THREE.CubicBezierCurve3(
-        a,
-        a.clone().add(new THREE.Vector3(0, -dy, 0)).addScaledVector(na, 2),
-        b.clone().add(new THREE.Vector3(0, dy, 0)).addScaledVector(nb, 2),
-        b,
-      );
-    } else {
-      const out = 7 + Math.random() * 5;
-      const ra = new THREE.Vector3(1, 0, 0).applyQuaternion(from.mesh.quaternion);
-      const side = this.helix ? 0 : Math.max(from.mesh.position.x + from.w / 2, to.mesh.position.x + to.w / 2) + 6 + Math.random() * 4;
-      const pa = this.helix ? a.clone().addScaledVector(na, out).add(new THREE.Vector3(0, -3, 0)) : new THREE.Vector3(side, a.y - 3, a.z + 6);
-      const pb = this.helix ? b.clone().addScaledVector(nb, out).add(new THREE.Vector3(0, 3, 0)) : new THREE.Vector3(side, b.y + 3, b.z + 6);
-      void ra;
-      const pts = [a, a.clone().add(new THREE.Vector3(0, -2.5, 0)).addScaledVector(na, 3), pa, pb, b.clone().add(new THREE.Vector3(0, 2.5, 0)).addScaledVector(nb, 3), b];
-      curve = new THREE.CatmullRomCurve3(pts, false, 'centripetal');
-    }
-    const geo = new THREE.TubeGeometry(curve as THREE.Curve<THREE.Vector3>, isBack ? 80 : 48, 0.11, 6, false);
-    const mat = new THREE.ShaderMaterial({
-      transparent: true,
-      depthWrite: false,
-      blending: THREE.AdditiveBlending,
-      uniforms: { ...globals, uColor: { value: color.clone() }, uSeed: { value: Math.random() }, uReveal: { value: 0 } },
-      vertexShader: `varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }`,
-      fragmentShader: /* glsl */ `
-        uniform vec3 uColor;
-        uniform float uTime;
-        uniform float uSeed;
-        uniform float uReveal;
-        varying vec2 vUv;
-        void main() {
-          if (vUv.x > uReveal) discard;
-          float p = smoothstep(0.8, 1.0, fract(vUv.x * 3.0 - uTime * 0.9 + uSeed));
-          gl_FragColor = vec4(uColor * (1.3 + p * 3.5), 0.55 + p * 0.45);
-        }`,
-    });
-    const mesh = new THREE.Mesh(geo, mat);
-    this.edgeMeshes.push(mesh);
-    this.group.add(mesh);
-    // arrow head
-    const cone = new THREE.Mesh(
-      new THREE.ConeGeometry(0.45, 1.1, 10),
-      new THREE.MeshBasicMaterial({ color: color.clone().multiplyScalar(2.2), transparent: true, opacity: 0.95 }),
-    );
-    cone.position.copy(b).add(new THREE.Vector3(0, -0.1, 0));
-    cone.rotation.x = Math.PI;
-    this.group.add(cone);
-  }
-
-  /** Animate panels & edges in. */
-  reveal(engineAdd: (fn: (dt: number) => void) => () => boolean) {
-    let t = 0;
-    const off = engineAdd((dt) => {
-      t += dt;
-      for (const p of this.panels) {
-        const delay = p.layer * 0.06;
-        (p.mesh.material as THREE.ShaderMaterial).uniforms.uReveal.value = Math.min(1, Math.max(0, (t - delay) * 2.2));
-      }
-      const er = Math.min(1, Math.max(0, (t - 0.3) * 0.9));
-      for (const e of this.edgeMeshes) (e.material as THREE.ShaderMaterial).uniforms.uReveal.value = er;
-      if (t > 4 + this.panels.length * 0.002) off();
-    });
-  }
-
+  // ----------------------------------------------------------------- queries
   panelAt(addr: number): Panel | null {
-    let best: Panel | null = null;
-    for (const p of this.panels) if (addr >= p.block.addr && addr < p.block.addr + Math.max(1, p.block.size)) best = p;
-    return best;
+    const direct = this.byAddr.get(addr);
+    if (direct) return direct;
+    for (const p of this.panels) if (addr >= p.block.addr && addr < p.block.addr + Math.max(1, p.block.size)) return p;
+    return null;
+  }
+
+  succ(addr: number): Edge[] {
+    return this.edges.filter((e) => e.from === addr);
+  }
+
+  preds(addr: number): Edge[] {
+    return this.edges.filter((e) => e.to === addr);
   }
 
   setSeek(addr: number): Panel | null {
     if (this.seekPanel) {
-      const u = (this.seekPanel.mesh.material as THREE.ShaderMaterial).uniforms;
-      u.uSeek.value = 0;
-      u.uRow.value.set(-1, -1);
+      this.seekPanel.mat.uniforms.uSeek.value = 0;
+      this.seekPanel.mat.uniforms.uRow.value.set(-1, -1);
+      this.seekPanel.mesh.position.z = 0;
     }
     const p = this.panelAt(addr);
     this.seekPanel = p;
     if (p) {
-      const u = (p.mesh.material as THREE.ShaderMaterial).uniforms;
-      u.uSeek.value = 1;
-      const r = p.rows.find((r) => r.addr === addr);
-      if (r) u.uRow.value.set(r.y0 / p.pxH, r.y1 / p.pxH);
+      p.mat.uniforms.uSeek.value = 1;
+      p.mesh.position.z = 1.2;
+      const r = p.rows.find((r) => r.addr === addr) ?? p.rows.find((r) => r.addr <= addr && addr < r.addr + 1) ?? null;
+      if (r) p.mat.uniforms.uRow.value.set(r.y0 / p.pxH, r.y1 / p.pxH);
     }
     return p;
   }
 
-  hover(mesh: THREE.Object3D | null) {
-    if (this.hoverPanel) (this.hoverPanel.mesh.material as THREE.ShaderMaterial).uniforms.uHover.value = 0;
-    this.hoverPanel = mesh ? (this.panels.find((p) => p.mesh === mesh) ?? null) : null;
-    if (this.hoverPanel) (this.hoverPanel.mesh.material as THREE.ShaderMaterial).uniforms.uHover.value = 1;
+  /** Secondary highlight (e.g. hovered line in the Inspector). */
+  hoverAddr(addr: number | null) {
+    if (this.rowHover) this.rowHover.mat.uniforms.uRow2.value.set(-1, -1);
+    this.rowHover = null;
+    if (addr === null) return;
+    const p = this.panelAt(addr);
+    if (!p) return;
+    const r = p.rows.find((r) => r.addr === addr);
+    if (r) p.mat.uniforms.uRow2.value.set(r.y0 / p.pxH, r.y1 / p.pxH);
+    this.rowHover = p;
   }
 
-  /** Map a raycast hit on a panel to the instruction address under it. */
+  hover(mesh: THREE.Object3D | null) {
+    if (this.hoverPanel) this.hoverPanel.mat.uniforms.uHover.value = 0;
+    this.hoverPanel = mesh ? (this.panels[mesh.userData.panel as number] ?? null) : null;
+    if (this.hoverPanel) this.hoverPanel.mat.uniforms.uHover.value = 1;
+  }
+
   opAtHit(mesh: THREE.Object3D, uv: THREE.Vector2): number | null {
-    const p = this.panels.find((q) => q.mesh === mesh);
+    const p = this.panels[mesh.userData.panel as number];
     if (!p) return null;
     const y = (1 - uv.y) * p.pxH;
     return p.rows.find((r) => y >= r.y0 && y < r.y1)?.addr ?? p.block.addr;
@@ -482,15 +507,12 @@ export class FuncView {
     return this.panels.map((p) => p.mesh);
   }
 
-  /** Camera framing for a panel (or the entry). */
-  frame(p: Panel | null): { pos: THREE.Vector3; target: THREE.Vector3 } {
+  frameOf(p: Panel | null): { pos: THREE.Vector3; target: THREE.Vector3 } {
     if (!p) return this.overview();
     const target = p.mesh.position.clone();
-    const span = Math.max(p.w, p.h * 1.6);
-    const dist = Math.max(22, span * 1.55);
-    const n = new THREE.Vector3(0, 0, 1).applyQuaternion(p.mesh.quaternion);
-    const r = new THREE.Vector3(1, 0, 0).applyQuaternion(p.mesh.quaternion);
-    return { pos: target.clone().addScaledVector(n, dist).addScaledVector(r, span * 0.12).add(new THREE.Vector3(0, -span * 0.06, 0)), target };
+    const span = Math.max(p.w * 0.75, p.h * 1.25);
+    const dist = Math.max(20, span * 1.7);
+    return { pos: target.clone().add(new THREE.Vector3(span * 0.1, -span * 0.04, dist)), target };
   }
 
   overview(aspect = window.innerWidth / window.innerHeight, fov = 55): { pos: THREE.Vector3; target: THREE.Vector3 } {
@@ -499,26 +521,25 @@ export class FuncView {
     this.bounds.getCenter(c);
     this.bounds.getSize(s);
     const t = Math.tan(THREE.MathUtils.degToRad(fov / 2));
-    if (this.helix) {
-      const top = new THREE.Vector3(c.x, this.bounds.max.y - 30, c.z);
-      const d = Math.max(s.x, s.z) * 1.6 + 60;
-      return { pos: top.clone().add(new THREE.Vector3(d * 0.55, d * 0.35, d * 0.85)), target: new THREE.Vector3(c.x, this.bounds.max.y - Math.min(s.y * 0.35, 140), c.z) };
-    }
-    const dist = Math.max(40, Math.max((s.y + 16) / 2 / t, (s.x + 16) / 2 / (t * aspect)) * 0.95);
-    // slightly from the side and below: the graph recedes in depth
-    return { pos: c.clone().add(new THREE.Vector3(dist * 0.42, -dist * 0.12, dist * 0.9)), target: c.clone().add(new THREE.Vector3(0, s.y * 0.04, 0)) };
+    // big graphs: frame the top part (entry) rather than a postage stamp of the whole thing
+    const fitH = Math.min(s.y + 20, Math.max(80, (s.x + 20) / aspect) * 1.4);
+    const dist = Math.max(40, Math.max(fitH / 2 / t, (s.x + 20) / 2 / (t * aspect)) * 0.92);
+    const target = new THREE.Vector3(c.x, Math.min(c.y, this.bounds.max.y - fitH / 2 + 10), 0);
+    return { pos: target.clone().add(new THREE.Vector3(dist * 0.18, -dist * 0.06, dist)), target };
   }
 
   dispose() {
-    this.group.traverse((o) => {
-      const m = o as THREE.Mesh;
-      if (m.geometry) m.geometry.dispose();
-      const mat = m.material as THREE.ShaderMaterial | undefined;
-      if (mat) {
-        (mat.uniforms?.uMap?.value as THREE.Texture | undefined)?.dispose();
-        mat.dispose();
-      }
-    });
-    this.title.dispose();
+    for (const p of this.panels) {
+      p.detail?.dispose();
+      p.mesh.geometry.dispose();
+      p.mat.dispose();
+    }
+    this.barTex.dispose();
+    this.edgeRibbons?.dispose();
+    this.arrows?.geometry.dispose();
+    (this.arrows?.material as THREE.Material | undefined)?.dispose();
+    this.title?.dispose();
+    this.backdrop?.geometry.dispose();
+    (this.backdrop?.material as THREE.Material | undefined)?.dispose();
   }
 }
