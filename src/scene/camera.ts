@@ -170,6 +170,8 @@ export class CameraRig {
           }
         },
         onComplete: () => res(),
+        // superseded by a newer flight: settle anyway so awaiting callers never hang
+        onInterrupt: () => res(),
       });
     });
   }

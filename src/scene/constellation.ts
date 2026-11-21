@@ -147,8 +147,12 @@ export class Constellation {
             this.mesh!.setMatrixAt(i, mtx);
           });
           this.mesh!.instanceMatrix.needsUpdate = true;
+          // InstancedMesh caches its bounds on first raycast; nodes are moving, so drop it
+          this.mesh!.boundingSphere = null;
+          this.mesh!.boundingBox = null;
         },
         onComplete: () => {
+          this.mesh!.computeBoundingSphere();
           this.buildEdges();
           res();
         },

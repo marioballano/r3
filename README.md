@@ -150,7 +150,7 @@ src/scene/    engine, camera rig (orbit/drone), city, call web, focus layer, con
 src/audio/    procedural score + sfx
 src/ui/       boot, picker, HUD, Inspector, palette, minimap, xterm shell
 scripts/      snap.ts (headless screenshots), wstest.ts (protocol smoke test),
-              graphcheck.ts (call graph vs r2 axtj/afxj)
+              graphcheck.ts (call graph vs r2 axtj/afxj), navtest.ts (navigation e2e)
 ```
 
 ## Dev helpers
@@ -159,6 +159,7 @@ scripts/      snap.ts (headless screenshots), wstest.ts (protocol smoke test),
 npm run typecheck
 npx tsx scripts/wstest.ts /usr/bin/grep              # needs the server running
 npx tsx scripts/graphcheck.ts /usr/bin/ssh fcn.00062ee0   # call graph == r2's axtj/afxj
+npx tsx scripts/navtest.ts /usr/bin/ssh              # end-to-end navigation test (needs `npm run dev`)
 npx playwright install chromium                      # once
 FN=fcn.00062ee0 npm run snap -- /usr/bin/ssh shots  # needs `npm run dev`; writes shots/*.png
 ```

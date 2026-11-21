@@ -159,14 +159,20 @@ export class World {
       downAt = { x: e.clientX, y: e.clientY, b: e.button };
       if (this.touring) this.stopTour();
     });
+    // the first click of a double-click starts a camera flight, so the second click may
+    // land on something else: a double-click acts on whatever the first click hit
+    let lastClick: { pick: Pick | null; t: number } = { pick: null, t: 0 };
     canvas.addEventListener('click', (e) => {
       if (downAt.b !== 0 || Math.hypot(e.clientX - downAt.x, e.clientY - downAt.y) > 5) return;
       if (this.transitioning || this.placeholder) return;
-      this.ev.click?.(this.pickNow());
+      const pick = this.pickNow();
+      if (e.detail === 1) lastClick = { pick, t: performance.now() };
+      if (e.detail === 1) this.ev.click?.(pick);
     });
     canvas.addEventListener('dblclick', () => {
       if (this.transitioning || this.placeholder) return;
-      this.ev.dbl?.(this.pickNow());
+      const recent = performance.now() - lastClick.t < 700 && lastClick.pick;
+      this.ev.dbl?.(recent ? lastClick.pick : this.pickNow());
     });
 
     this.setFog(160);
@@ -210,8 +216,8 @@ export class World {
 
   /** Drone collision: stay above ground, slide off buildings. */
   private collide(p: THREE.Vector3) {
+    if (this.view !== 'city' || !this.city) return; // the core / constellation float in open space
     p.y = Math.max(p.y, 1.5);
-    if (this.view !== 'city' || !this.city) return;
     const cx = Math.round(p.x / CELL);
     const cz = Math.round(p.z / CELL);
     for (let dx = -1; dx <= 1; dx++)
@@ -242,6 +248,16 @@ export class World {
     this.model = model;
     this.placeholder = false;
     this.clearFocus();
+    if (this.constel) {
+      this.engine.scene.remove(this.constel.group);
+      this.constel.dispose();
+      this.constel = null;
+    }
+    if (this.func) {
+      this.engine.scene.remove(this.func.group);
+      this.func.dispose();
+      this.func = null;
+    }
     const entryAddr = this.info?.entries?.[0]?.vaddr ?? null;
     const r = City.radiusFor(model.fns);
     this.setFog(r);
@@ -409,6 +425,21 @@ export class World {
   /** Dive → swap scenes behind a flash → arrive. */
   private async warp(swap: () => Promise<{ pos: THREE.Vector3; target: THREE.Vector3 }>, out = false) {
     this.transitioning = true;
+    this.ev.hover?.(null, { x: 0, y: 0 });
+    try {
+      await this.warpInner(swap, out);
+    } finally {
+      this.transitioning = false;
+      this.setWarp(0);
+      const cam = this.engine.camera;
+      if (cam.fov !== 55) {
+        cam.fov = 55;
+        cam.updateProjectionMatrix();
+      }
+    }
+  }
+
+  private async warpInner(swap: () => Promise<{ pos: THREE.Vector3; target: THREE.Vector3 }>, out: boolean) {
     this.rig.stop();
     const cam = this.engine.camera;
     const ctl = this.engine.controls;
@@ -421,6 +452,7 @@ export class World {
           ...to,
           duration: d,
           ease,
+          onInterrupt: () => r(),
           onUpdate: () => {
             this.setWarp(warp.v);
             cam.fov = warp.fov;
@@ -439,7 +471,6 @@ export class World {
     if (this.rig.mode === 'orbit') ctl.target.copy(land.target);
     else cam.lookAt(land.target);
     await Promise.all([tw({ v: 0, fov: 55 }, 1.5, 'power3.out'), this.flyTo(land.pos, land.target, 1.7, 'power3.out')]);
-    this.transitioning = false;
   }
 
   private showOnly(view: View) {
@@ -501,7 +532,7 @@ export class World {
   }
 
   async recenter(fi: number) {
-    if (!this.constel) return;
+    if (!this.constel || this.transitioning) return;
     audio.whoosh(0.9, true);
     this.engine.glitch(0.25, 0.5);
     const from = this.constel.nodes.find((n) => n.fi === fi)?.pos.clone();

@@ -99,6 +99,8 @@ export interface FunctionsMsg {
   calls: [number, number, number][];
   /** string references: [fnIdx, siteAddr, stringVaddr] */
   strRefs: [number, number, number][];
+  /** flat [fnIdx, blockAddr, blockSize, …] */
+  blocks: number[];
   seek: number | null;
 }
 

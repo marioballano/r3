@@ -148,7 +148,7 @@ class App {
         openFn: (fi, site) => this.openFn(fi, site),
         core: (fi, site) => this.openCore(fi, site),
         constellation: (fi) => this.openGraph(fi),
-        focus: (fi) => this.select(fi, { fly: true }),
+        focus: (fi) => this.focusFn(fi),
         hoverAddr: (a) => this.hoverAddr(a),
       },
     );
@@ -298,21 +298,75 @@ class App {
     if (o.push !== false) this.nav.push({ view: this.world.view, fi, addr: o.addr ?? null });
   }
 
+  // ---------------------------------------------------------------- view changes
+  // Every view change runs in one exclusive lane: input arriving while a warp or a
+  // graph fetch is in flight is rejected (with a soft blip) instead of half-applying
+  // and leaving the HUD, history and world out of sync.
+  private navBusy = false;
+
+  /** current view, re-read after awaits (TS would otherwise keep a stale narrowing) */
+  private viewNow(): string {
+    return this.world.view;
+  }
+
+  private get busy() {
+    return this.navBusy || this.world.transitioning;
+  }
+
+  private async exclusive(fn: () => Promise<void>) {
+    if (this.busy) {
+      audio.blip(180, 0.04, 'square', 0.02);
+      return false;
+    }
+    this.navBusy = true;
+    try {
+      await fn();
+    } finally {
+      this.navBusy = false;
+    }
+    return true;
+  }
+
   /** Open a function from a reference (Inspector, palette…) staying in the current view type. */
   openFn(fi: number, site?: number) {
     const v = this.world.view;
-    if (v === 'function') return this.openCore(fi, site);
-    if (v === 'constellation') {
-      this.world.recenter(fi);
-      this.sel = fi;
-      this.inspector.show(fi, site);
-      this.nav.push({ view: 'constellation', fi, addr: null });
-      return;
-    }
+    if (v === 'function') return void this.openCore(fi, site);
+    if (v === 'constellation') return void this.exclusive(() => this.recenterTo(fi, true));
     this.select(fi, { addr: site });
   }
 
-  async openCore(fi: number, site?: number, push = true) {
+  /** Select + focus in the city, leaving the core / constellation if needed. */
+  focusFn(fi: number) {
+    if (this.world.view === 'city') return this.select(fi);
+    void this.exclusive(async () => {
+      await this.doToCity(false);
+      this.select(fi);
+    });
+  }
+
+  openCore(fi: number, site?: number, push = true) {
+    return this.exclusive(() => this.doOpenCore(fi, site, push));
+  }
+
+  openGraph(fi: number, push = true) {
+    return this.exclusive(() => this.doOpenGraph(fi, push));
+  }
+
+  toCity(push = true) {
+    return this.exclusive(() => this.doToCity(push));
+  }
+
+  private async recenterTo(fi: number, push: boolean) {
+    this.sel = fi;
+    this.inspector.show(fi);
+    const done = this.world.recenter(fi);
+    this.setSeekUi(this.model!.fns[fi].addr);
+    this.syncR2(this.model!.fns[fi].addr);
+    if (push) this.nav.push({ view: 'constellation', fi, addr: null });
+    await done;
+  }
+
+  private async doOpenCore(fi: number, site?: number, push = true) {
     const m = this.model;
     if (!m || !this.sock) return;
     if (m.fns[fi].imp) {
@@ -329,38 +383,43 @@ class App {
       this.hud.caption('// NO GRAPH', `nothing to render at ${hex(m.fns[fi].addr)}`);
       return;
     }
+    await this.world.enterFunction(g, site);
+    if (this.viewNow() !== 'function' || this.world.func?.graph.addr !== g.addr) return;
     this.sel = fi;
     this.walk = [];
     this.hud.setView('CORE // CONTROL FLOW');
     this.hud.setDepth(null);
     this.hud.caption(`// ${g.name}`, `${g.blocks.length} blocks · ${g.ninstr} instructions · ↓ → ↑ ← walk the flow`);
     this.inspector.show(fi, site ?? g.addr);
-    await this.world.enterFunction(g, site);
     this.setSeekUi(site ?? g.addr);
     this.syncR2(site ?? g.addr);
     if (push) this.nav.push({ view: 'function', fi, addr: site ?? null });
   }
 
-  async openGraph(fi: number, push = true) {
+  private async doOpenGraph(fi: number, push = true) {
     if (!this.model) return;
+    if (this.world.view === 'constellation') return this.recenterTo(fi, push);
+    await this.world.enterConstellation(fi);
+    if (this.viewNow() !== 'constellation') return;
     this.sel = fi;
     this.hud.setView('CONSTELLATION // CALL GRAPH');
     this.hud.setDepth(null);
     this.hud.caption(`// ${this.model.fns[fi].name}`, 'callers above · callees below · imports on the amber ring · click to re-centre');
     this.inspector.show(fi);
-    await this.world.enterConstellation(fi);
     this.setSeekUi(this.model.fns[fi].addr);
     this.syncR2(this.model.fns[fi].addr);
     if (push) this.nav.push({ view: 'constellation', fi, addr: null });
   }
 
-  async toCity(push = true) {
+  private async doToCity(push = true) {
     if (this.world.view === 'city') return;
     await this.world.backToCity();
+    if (this.viewNow() !== 'city') return;
     this.hud.setView('CITY // ADDRESS SPACE');
     if (this.sel !== null) {
       this.world.setFocus(this.sel, this.depth);
       this.hud.setDepth(this.depth);
+      this.inspector.show(this.sel);
     }
     if (push) this.nav.push({ view: 'city', fi: this.sel, addr: null });
   }
@@ -411,7 +470,7 @@ class App {
   // ---------------------------------------------------------------- history
   private async apply(e: NavEntry) {
     if (e.view === 'city') {
-      await this.toCity(false);
+      await this.doToCity(false);
       if (e.fi !== null) this.select(e.fi, { push: false, addr: e.addr ?? undefined });
       else {
         this.world.clearFocus();
@@ -419,31 +478,39 @@ class App {
         this.hud.setDepth(null);
       }
     } else if (e.view === 'constellation' && e.fi !== null) {
-      if (this.world.view === 'constellation') {
-        this.world.recenter(e.fi);
-        this.sel = e.fi;
-        this.inspector.show(e.fi);
-      } else await this.openGraph(e.fi, false);
+      await this.doOpenGraph(e.fi, false);
     } else if (e.view === 'function' && e.fi !== null) {
-      await this.openCore(e.fi, e.addr ?? undefined, false);
-      if (e.addr !== null) this.goto(e.addr);
+      await this.doOpenCore(e.fi, e.addr ?? undefined, false);
+      if (e.addr !== null && this.world.view === 'function') this.seekInCore(e.addr);
     }
+  }
+
+  /** Move within the open core without touching history. */
+  private seekInCore(addr: number) {
+    const fv = this.world.func;
+    const p = fv?.panelAt(addr);
+    if (!fv || !p) return;
+    fv.setSeek(addr);
+    const f = fv.frameOf(p);
+    this.world.flyTo(f.pos, f.target, 1.1);
+    this.setSeekUi(addr);
+    this.syncR2(addr);
+  }
+
+  private travelHistory(dir: -1 | 1) {
+    if (this.busy) return audio.blip(180, 0.04, 'square', 0.02);
+    const e = dir < 0 ? this.nav.back() : this.nav.forward();
+    if (!e) return;
+    audio.whoosh(0.5, dir > 0);
+    void this.exclusive(() => this.apply(e));
   }
 
   back() {
-    const e = this.nav.back();
-    if (e) {
-      audio.whoosh(0.5, false);
-      this.apply(e);
-    }
+    this.travelHistory(-1);
   }
 
   forward() {
-    const e = this.nav.forward();
-    if (e) {
-      audio.whoosh(0.5, true);
-      this.apply(e);
-    }
+    this.travelHistory(1);
   }
 
   private renderCrumbs() {
@@ -452,7 +519,10 @@ class App {
       this.nav.trail(5).map(({ e, current }) => ({
         label: (e.view === 'city' ? '◌ ' : e.view === 'constellation' ? '✶ ' : '◈ ') + (e.fi !== null && m ? m.fns[e.fi].name.replace(/^sym\./, '') : 'city'),
         current,
-        onClick: () => this.apply(e),
+        onClick: () => {
+          if (this.busy || current) return;
+          if (this.nav.jump(e)) void this.exclusive(() => this.apply(e));
+        },
       })),
     );
   }
@@ -657,7 +727,10 @@ class App {
     const w = this.world;
     if (cmd.startsWith(':')) return this.meta(cmd);
     if (cmd === 'q' || cmd === '..' || cmd === 'exit' || cmd === 'q!') {
-      if (w.view !== 'city') return this.toCity();
+      if (w.view !== 'city') {
+        await this.toCity();
+        return;
+      }
       this.shell.write('\x1b[38;2;107;93;140m(already in the city — :open to pick another binary)\x1b[0m\n');
       return;
     }
@@ -830,4 +903,6 @@ class App {
 }
 
 const app = new App();
+// dev builds only: expose the app for the Playwright navigation tests (scripts/navtest.ts)
+if (import.meta.env.DEV) (window as unknown as { __r3: App }).__r3 = app;
 document.fonts.ready.then(() => app.boot());

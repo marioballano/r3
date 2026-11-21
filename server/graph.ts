@@ -50,6 +50,8 @@ export interface GraphOut {
   calls: [number, number, number][];
   /** [fnIdx, siteAddr, stringVaddr] */
   strRefs: [number, number, number][];
+  /** flat [fnIdx, blockAddr, blockSize, …] — exact basic-block ownership */
+  blocks: number[];
   /** how many xrefs could be attributed to a function via basic blocks vs bounds fallback */
   stats: { bbAttributed: number; boundsAttributed: number; unattributed: number };
 }
@@ -180,5 +182,7 @@ export function buildGraph(afl: AflEntry[], blocks: { addr: number; size: number
     }
   }
   calls.sort((a, b) => a[2] - b[2]);
-  return { functions, calls, strRefs, stats };
+  const flat: number[] = [];
+  for (const iv of bbIv) flat.push(iv.fn, iv.start, iv.end - iv.start);
+  return { functions, calls, strRefs, blocks: flat, stats };
 }

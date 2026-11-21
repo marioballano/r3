@@ -190,7 +190,7 @@ export class Session {
     const g = buildGraph(afl, blocks, xrefs, stringAddrs);
     console.log(`[r3] ${bin.path}: ${g.functions.length} fns, ${g.calls.length} call sites, ${g.strRefs.length} string refs, attribution`, g.stats);
     const seek = parseInt((await r2.cmd('s')).trim(), 16);
-    this.send({ t: 'functions', functions: g.functions, calls: g.calls, strRefs: g.strRefs, seek });
+    this.send({ t: 'functions', functions: g.functions, calls: g.calls, strRefs: g.strRefs, blocks: g.blocks, seek });
     this.status('online', 1);
   }
 }

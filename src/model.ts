@@ -30,6 +30,10 @@ export class Model {
   strIn = new Map<number, StrRef[]>();
   strings = new Map<number, StringEntry>();
   private sorted: number[];
+  /** basic blocks sorted by address: parallel arrays */
+  private bbStart: Float64Array;
+  private bbEnd: Float64Array;
+  private bbFn: Int32Array;
   private byName = new Map<string, number>();
   readonly callCount: number;
 
@@ -54,6 +58,16 @@ export class Model {
     }
     this.fns.forEach((f, i) => this.byName.set(f.name, i));
     this.sorted = this.fns.map((_, i) => i).sort((a, b) => this.fns[a].addr - this.fns[b].addr);
+    const nb = Math.floor((msg.blocks?.length ?? 0) / 3);
+    const order = Array.from({ length: nb }, (_, i) => i).sort((a, b) => msg.blocks[a * 3 + 1] - msg.blocks[b * 3 + 1]);
+    this.bbStart = new Float64Array(nb);
+    this.bbEnd = new Float64Array(nb);
+    this.bbFn = new Int32Array(nb);
+    order.forEach((k, i) => {
+      this.bbFn[i] = msg.blocks[k * 3];
+      this.bbStart[i] = msg.blocks[k * 3 + 1];
+      this.bbEnd[i] = msg.blocks[k * 3 + 1] + Math.max(1, msg.blocks[k * 3 + 2]);
+    });
   }
 
   index(name: string): number {
@@ -66,18 +80,31 @@ export class Model {
     return i >= 0 && this.fns[this.sorted[i]].addr === addr ? this.sorted[i] : -1;
   }
 
-  /** Function containing `addr` (smallest range among those covering it). */
+  /**
+   * Function owning `addr`: exact via its basic blocks (the same attribution the
+   * server uses for xrefs). A function entry always wins over a block of another
+   * function that happens to overlap it (shared tails). Falls back to the closest
+   * preceding entry whose range covers the address.
+   */
   fnAt(addr: number): number {
-    let best = -1;
-    let span = Infinity;
-    for (let i = this.lowerBound(addr), k = 0; i >= 0 && k < 64; i--, k++) {
-      const f = this.fns[this.sorted[i]];
-      if (addr >= f.min && addr <= f.max && f.max - f.min < span) {
-        best = this.sorted[i];
-        span = f.max - f.min;
-      }
+    const e = this.entryAt(addr);
+    if (e >= 0) return e;
+    let lo = 0;
+    let hi = this.bbStart.length - 1;
+    let k = -1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      if (this.bbStart[mid] <= addr) {
+        k = mid;
+        lo = mid + 1;
+      } else hi = mid - 1;
     }
-    return best;
+    for (let i = k; i >= 0 && i > k - 16; i--) if (addr >= this.bbStart[i] && addr < this.bbEnd[i]) return this.bbFn[i];
+    for (let i = this.lowerBound(addr), n = 0; i >= 0 && n < 64; i--, n++) {
+      const f = this.fns[this.sorted[i]];
+      if (addr >= f.min && addr <= f.max) return this.sorted[i];
+    }
+    return -1;
   }
 
   private lowerBound(addr: number): number {

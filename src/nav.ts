@@ -39,6 +39,20 @@ export class NavHistory {
     return this.stack[this.i];
   }
 
+  /** Move the cursor to a specific entry (breadcrumb click). */
+  jump(e: NavEntry): NavEntry | null {
+    const k = this.stack.lastIndexOf(e);
+    if (k < 0) return null;
+    this.i = k;
+    this.onChange();
+    return e;
+  }
+
+  /** for tests / debugging */
+  snapshot() {
+    return { i: this.i, stack: this.stack.map((e) => ({ ...e })) };
+  }
+
   trail(n = 6): { e: NavEntry; current: boolean }[] {
     const from = Math.max(0, this.i - n + 1);
     return this.stack.slice(from, this.i + 1).map((e, k) => ({ e, current: from + k === this.i }));

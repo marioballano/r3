@@ -17,7 +17,7 @@
 html, body { margin: 0; height: 100%; overflow: hidden; background: var(--ink); color: #dff8ff; font-family: var(--ui); }
 #gl { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; outline: none; }
 #ui { position: fixed; inset: 0; pointer-events: none; z-index: 2; }
-#ui > * { pointer-events: auto; }
+#ui > *:not(.hud) { pointer-events: auto; }
 .hidden { display: none !important; }
 ::selection { background: var(--mag); color: #000; }
 
