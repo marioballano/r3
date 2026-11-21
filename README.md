@@ -1,6 +1,9 @@
 # r3
 
-**radare2, in three dimensions.** Pick a binary that's already on the host, jack in, and fly through it.
+**radare2, in three dimensions.** Pick a binary that's already on the host, jack in, and fly through it, on the
+desktop or in a headset: r3 also has a [VR / MR mode](#headset-webxr) (WebXR, tested on Meta Quest 3).
+
+> r3 is a work in progress, made to have some fun. There are still a few glitches. Contributions are welcome.
 
 r3 is an artistic front end for [radare2](https://github.com/radareorg/radare2): a real r2 session drives a
 WebGL world. Functions become a neon city, calls become arcs of light, entropy becomes a ring around the city,
@@ -130,6 +133,44 @@ Meta commands: `:tour`, `:home`, `:drone`, `:open`, `:music on|off|vol N`, `:fx 
 Once a binary is loaded the session runs with `cfg.sandbox=true`, so shell escapes (`!`) and file access are
 blocked. `q` and visual modes are intercepted.
 
+## Headset (WebXR)
+
+r3 runs in a VR headset's browser (built and tested against the Meta Quest 3 browser's WebXR). Two buttons sit above
+the radar when the browser supports WebXR:
+
+- **ENTER VR**: you're in the city at life size, at the desktop camera's position.
+- **MR**: passthrough. The current view becomes a miniature on a table in your room.
+
+Pick the binary in the 2D page first (JACK IN, then the picker), then enter VR. The Inspector and the shell are
+2D only; take the headset view off to use them.
+
+WebXR needs a secure context, so the headset has to open r3 either on `localhost` or over HTTPS:
+
+- **USB (recommended).** Enable developer mode on the headset, plug it in and run `adb reverse tcp:5173 tcp:5173`
+  on the machine it's plugged into. Then open `http://localhost:5173` in the headset browser. Nothing is exposed
+  to the network.
+- **Wi-Fi.** `R3_LAN=1 npm run dev` serves Vite on every interface over HTTPS with a self-signed certificate. Open
+  the `Network` URL that Vite prints and accept the certificate warning. **This exposes the API, which browses
+  the host filesystem, to everyone on the network.**
+
+| Controller | Action |
+|---|---|
+| trigger (either hand) | select what the ray points at; press twice quickly to dive into the core / follow a call |
+| A · B | dive into the core · back out (like `Enter` · `Esc`) |
+| X · Y | call-graph constellation · world scale: life size → giant ×12 → tabletop |
+| left stick (+ grip to boost) | fly where you look |
+| right stick | snap turn 30° · rise / sink |
+| right grip + right-stick flick | core: walk the control flow (↓ fall-through, → taken, ↑ predecessor, ← back) |
+| left stick click · right stick click | focus depth 1/2/3 · overview |
+
+A card follows the ray with what it points at. A display above the left controller shows the view, the selection
+and these controls. Camera flights move you with them: a short blink re-aims you towards the subject, and a
+vignette narrows your peripheral view while you move. In tabletop mode, flights don't move you; the miniature
+re-centres when the view changes.
+
+The bloom, CRT pass and ground reflection are desktop-only. They'd cost too much per eye, and the post-processing
+chain can't render into the XR framebuffer. Materials apply the same ACES tone mapping instead.
+
 ## Audio
 
 Everything is synthesised with Web Audio; there are no samples. The layers are detuned saw pads through a
@@ -149,8 +190,10 @@ src/scene/    engine, camera rig (orbit/drone), city, call web, focus layer, con
               CFG core (+ dagre worker), ribbons (screen-space lines), halo, relays, world
 src/audio/    procedural score + sfx
 src/ui/       boot, picker, HUD, Inspector, palette, minimap, xterm shell
+src/xr/       WebXR: headset rig, controllers, comfort, in-headset text cards
 scripts/      snap.ts (headless screenshots), wstest.ts (protocol smoke test),
-              graphcheck.ts (call graph vs r2 axtj/afxj), navtest.ts (navigation e2e)
+              graphcheck.ts (call graph vs r2 axtj/afxj), navtest.ts (navigation e2e),
+              xrtest.ts + xrmock.js (WebXR e2e against a mocked headset)
 ```
 
 ## Dev helpers
@@ -160,6 +203,7 @@ npm run typecheck
 npx tsx scripts/wstest.ts /usr/bin/grep              # needs the server running
 npx tsx scripts/graphcheck.ts /usr/bin/ssh fcn.00062ee0   # call graph == r2's axtj/afxj
 npx tsx scripts/navtest.ts /usr/bin/ssh              # end-to-end navigation test (needs `npm run dev`)
+npx tsx scripts/xrtest.ts /usr/bin/ssh shots/xr     # WebXR e2e with a mocked headset; saves stereo frames
 npx playwright install chromium                      # once
 FN=fcn.00062ee0 npm run snap -- /usr/bin/ssh shots  # needs `npm run dev`; writes shots/*.png
 ```

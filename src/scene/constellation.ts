@@ -64,7 +64,7 @@ export class Constellation {
           vW = w.xyz;
           vN = normalize(mat3(modelMatrix * instanceMatrix) * normal);
           vec4 mv = viewMatrix * w;
-          vDist = -mv.z;
+          vDist = -mv.z / length(viewMatrix[0].xyz); // world units, also under a scaled XR rig
           gl_Position = projectionMatrix * mv;
         }`,
       fragmentShader: /* glsl */ `

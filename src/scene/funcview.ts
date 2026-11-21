@@ -153,7 +153,7 @@ export class FuncView {
         vertexShader: /* glsl */ `
           varying vec2 vUv;
           varying float vDist;
-          void main() { vUv = uv; vec4 mv = modelViewMatrix * vec4(position, 1.0); vDist = -mv.z; gl_Position = projectionMatrix * mv; }`,
+          void main() { vUv = uv; vec4 mv = modelViewMatrix * vec4(position, 1.0); vDist = -mv.z / length(viewMatrix[0].xyz); gl_Position = projectionMatrix * mv; }`,
         fragmentShader: /* glsl */ `
           ${FOG_PARS}
           uniform sampler2D uMap;
@@ -370,9 +370,9 @@ export class FuncView {
 
   // ----------------------------------------------------------------- LOD
   /** Keep crisp text only on the panels that are big on screen. */
-  updateLod(camera: THREE.PerspectiveCamera) {
+  updateLod(camera: THREE.PerspectiveCamera, viewH = window.innerHeight) {
     if (++this.frame % 6) return;
-    const k = window.innerHeight / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)));
+    const k = viewH / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)));
     const v = new THREE.Vector3();
     const scored: { p: Panel; px: number }[] = [];
     const frustum = new THREE.Frustum().setFromProjectionMatrix(new THREE.Matrix4().multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse));

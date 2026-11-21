@@ -5,6 +5,8 @@ export const globals = {
   uTime: { value: 0 },
   uFogColor: { value: new THREE.Color(0x12052a) },
   uFogDensity: { value: 0.0016 },
+  /** size in px that screen-space line widths are measured against (the window, or a nominal eye buffer in XR) */
+  uRes: { value: new THREE.Vector2(window.innerWidth, window.innerHeight) },
 };
 
 export const NOISE = /* glsl */ `

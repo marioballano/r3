@@ -74,6 +74,15 @@ export class World {
   transitioning = false;
   private touring = false;
   private grid = new Map<string, Tower[]>();
+  /** WebXR: pick along this ray instead of the mouse pointer */
+  xrRay: THREE.Ray | null = null;
+  /** world point of the last successful pick (WebXR laser length, tooltip anchor) */
+  hitPoint: THREE.Vector3 | null = null;
+  /** WebXR: the camera and eye-buffer height that the CFG text LOD is judged from */
+  lod: { camera: THREE.PerspectiveCamera; viewH: number } | null = null;
+  private fogRadius = 160;
+  private fogOn = true;
+  private lastXrSelect: { pick: Pick | null; t: number } = { pick: null, t: 0 };
 
   constructor(canvas: HTMLCanvasElement) {
     const engine = (this.engine = new Engine(canvas));
@@ -132,7 +141,8 @@ export class World {
       this.sky.update(engine.camera);
       this.city?.update(dt);
       this.halo?.update(dt);
-      if (this.view === 'function') this.func?.updateLod(engine.camera);
+      if (this.view === 'function') this.func?.updateLod(this.lod?.camera ?? engine.camera, this.lod?.viewH);
+      if (this.xrRay) this.pointerDirty = true; // the controller moves every frame
       if (this.rig.mode === 'drone' && this.rig.locked) {
         this.pointer.set(0, 0);
         this.pointerPx = { x: window.innerWidth / 2, y: window.innerHeight / 2 };
@@ -183,11 +193,27 @@ export class World {
 
   // ------------------------------------------------------------ environment
   private setFog(radius: number) {
-    const d = 0.9 / (radius * 2.2 + 380);
+    this.fogRadius = radius;
+    const d = this.fogOn ? 0.9 / (radius * 2.2 + 380) : 0;
     globals.uFogDensity.value = d;
     (this.engine.scene.fog as THREE.FogExp2).density = d;
     this.ground.mesh.material.uniforms.uFogDensity.value = d;
   }
+
+  /** WebXR passthrough has no fog: it would tint the room. */
+  setFogOn(on: boolean) {
+    this.fogOn = on;
+    this.setFog(this.fogRadius);
+  }
+
+  /** WebXR passthrough: drop the sky, ground and background so the room shows through. */
+  setPassthrough(on: boolean) {
+    this.sky.mesh.visible = !on;
+    this.ground.mesh.visible = !on && this.view === 'city';
+    this.engine.scene.background = on ? null : new THREE.Color(0x05020c);
+    this.passthrough = on;
+  }
+  private passthrough = false;
 
   private setMood(view: View) {
     const city = view === 'city';
@@ -367,24 +393,30 @@ export class World {
 
   // ------------------------------------------------------------ picking
   private pickNow(): Pick | null {
-    if (this.pointer.x > 2) return null;
-    this.raycaster.setFromCamera(this.pointer, this.engine.camera);
+    this.hitPoint = null;
+    if (this.xrRay) this.raycaster.ray.copy(this.xrRay);
+    else if (this.pointer.x > 2) return null;
+    else this.raycaster.setFromCamera(this.pointer, this.engine.camera);
     const ray = this.raycaster;
     if (this.view === 'function' && this.func) {
       const hit = ray.intersectObjects(this.func.pickables(), false)[0];
       if (hit?.uv) {
         const addr = this.func.opAtHit(hit.object, hit.uv);
+        this.hitPoint = hit.point;
         if (addr !== null) return { kind: 'op', addr };
       }
       return null;
     }
     if (this.view === 'constellation' && this.constel) {
       const i = this.constel.pick(ray);
-      return i >= 0 ? { kind: 'node', fi: this.constel.nodes[i].fi, index: i } : null;
+      if (i < 0) return null;
+      this.hitPoint = this.constel.nodes[i].pos.clone().applyMatrix4(this.constel.group.matrixWorld);
+      return { kind: 'node', fi: this.constel.nodes[i].fi, index: i };
     }
     if (!this.city || this.placeholder || !this.model) return null;
     const hits = ray.intersectObject(this.city.mesh, false);
     const h = hits[0];
+    if (h) this.hitPoint = h.point;
     if (h?.instanceId !== undefined) {
       const t = this.city.towers[h.instanceId];
       const f = this.model.fns[t.fnIndex];
@@ -397,10 +429,31 @@ export class World {
       const sh = ray.intersectObject(this.sats.group.children[0], false)[0];
       if (sh?.instanceId !== undefined) {
         const s = this.sats.sats[sh.instanceId];
+        this.hitPoint = sh.point;
         return { kind: 'sat', fi: s.fnIndex, name: s.name };
       }
     }
     return null;
+  }
+
+  /** WebXR trigger: a click on whatever the controller ray hits; a quick second press is a double-click on the first one's target. */
+  xrSelect() {
+    if (this.transitioning || this.placeholder) return;
+    const now = performance.now();
+    const last = this.lastXrSelect;
+    if (now - last.t < 450) {
+      this.lastXrSelect = { pick: null, t: 0 };
+      this.ev.dbl?.(last.pick ?? this.pickNow());
+      return;
+    }
+    const pick = this.pickNow();
+    this.lastXrSelect = { pick, t: now };
+    this.ev.click?.(pick);
+  }
+
+  /** Collision for the WebXR rig (same rules as the drone). */
+  collidePoint(p: THREE.Vector3) {
+    this.collide(p);
   }
 
   private updateHover() {
@@ -481,7 +534,7 @@ export class World {
   private showOnly(view: View) {
     this.view = view;
     this.cityGroup.visible = view === 'city';
-    this.ground.mesh.visible = view === 'city';
+    this.ground.mesh.visible = view === 'city' && !this.passthrough;
     if (this.func) this.func.group.visible = view === 'function';
     if (this.constel) this.constel.group.visible = view === 'constellation';
     this.engine.controls.maxPolarAngle = view === 'city' ? Math.PI * 0.495 : Math.PI;

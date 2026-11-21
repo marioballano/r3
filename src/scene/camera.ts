@@ -21,7 +21,11 @@ export class CameraRig {
     p.y = Math.max(p.y, 1.5);
   };
   onMode: (m: CamMode) => void = () => {};
+  /** a flight is starting (the WebXR layer re-aims the headset towards `target`) */
+  onFlight: (pos: THREE.Vector3, target: THREE.Vector3) => void = () => {};
   private tween: gsap.core.Tween | null = null;
+  private inFlight = false;
+  private flight: object | null = null;
   private dragging = false;
   minY = 1.5;
   /** direction long flights arc towards: up in the city, out of the graph plane in the core */
@@ -159,8 +163,12 @@ export class CameraRig {
       mid.addScaledVector(this.liftAxis, along - mid.dot(this.liftAxis) + lift * 0.6);
     }
     const curve = new THREE.QuadraticBezierCurve3(p0, mid, pos.clone());
+    this.onFlight(pos, target);
     const look = new THREE.Vector3();
     const o = { t: 0 };
+    const token = {};
+    this.flight = token;
+    this.inFlight = true;
     return new Promise((res) => {
       this.tween = gsap.to(o, {
         t: 1,
@@ -177,9 +185,15 @@ export class CameraRig {
             this.pitch = Math.asin(THREE.MathUtils.clamp(d.y, -1, 1));
           }
         },
-        onComplete: () => res(),
+        onComplete: () => {
+          if (this.flight === token) this.inFlight = false;
+          res();
+        },
         // superseded by a newer flight: settle anyway so awaiting callers never hang
-        onInterrupt: () => res(),
+        onInterrupt: () => {
+          if (this.flight === token) this.inFlight = false;
+          res();
+        },
       });
     });
   }
@@ -188,7 +202,8 @@ export class CameraRig {
     this.tween?.kill();
   }
 
+  /** true from flyTo() on, not just once the tween has ticked (it may be started mid-frame) */
   get flying() {
-    return !!this.tween?.isActive();
+    return this.inFlight;
   }
 }

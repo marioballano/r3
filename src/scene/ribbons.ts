@@ -82,7 +82,7 @@ export class Ribbons {
       blending: THREE.AdditiveBlending,
       uniforms: {
         ...globals,
-        uRes: { value: new THREE.Vector2(window.innerWidth, window.innerHeight) },
+        uRes: globals.uRes, // shared: the engine keeps it in step with the window / XR
         uSpacing: { value: opts.pulseSpacing ?? 28 },
         uHi: { value: -1 },
         uNode: { value: -1 },
@@ -138,7 +138,7 @@ export class Ribbons {
           vP = aP;
           vLen = aQ.x;
           vHi = hi;
-          vDist = c.w;
+          vDist = c.w / length(viewMatrix[0].xyz); // world units, also under a scaled XR rig
         }`,
       fragmentShader: /* glsl */ `
         uniform float uTime;
@@ -175,12 +175,7 @@ export class Ribbons {
     this.mesh = new THREE.Mesh(geo, this.material);
     this.mesh.frustumCulled = false;
     if (opts.renderOrder !== undefined) this.mesh.renderOrder = opts.renderOrder;
-    window.addEventListener('resize', this.onResize);
   }
-
-  private onResize = () => {
-    this.material.uniforms.uRes.value.set(window.innerWidth, window.innerHeight);
-  };
 
   highlight(tag: number) {
     this.material.uniforms.uHi.value = tag;
@@ -191,7 +186,6 @@ export class Ribbons {
   }
 
   dispose() {
-    window.removeEventListener('resize', this.onResize);
     this.geo.dispose();
     this.material.dispose();
   }

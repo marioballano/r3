@@ -172,7 +172,7 @@ export class City {
           vec4 w = modelMatrix * instanceMatrix * vec4(p, 1.0);
           vWorld = w.xyz;
           vec4 mv = viewMatrix * w;
-          vDist = -mv.z;
+          vDist = -mv.z / length(viewMatrix[0].xyz); // world units, also under a scaled XR rig
           gl_Position = projectionMatrix * mv;
         }`,
       fragmentShader: /* glsl */ `
@@ -298,7 +298,7 @@ export class City {
         void main() {
           vUv = uv;
           vec4 mv = modelViewMatrix * vec4(position, 1.0);
-          vDist = -mv.z;
+          vDist = -mv.z / length(viewMatrix[0].xyz); // world units, also under a scaled XR rig
           gl_Position = projectionMatrix * mv;
         }`,
       fragmentShader: /* glsl */ `

@@ -330,3 +330,13 @@ body.ins-open .minimap { right: 512px; }
 
 .xr-sec.ref .xr-title { color: #b48cff; }
 .xr-site.tail { color: #5dff9b; border-color: rgba(93, 255, 155, 0.4); }
+
+/* ---------- WebXR ---------- */
+.xrbar { position: absolute; right: 22px; bottom: 312px; display: flex; gap: 8px; z-index: 6; } /* above the radar */
+body.ins-open .xrbar { right: 512px; }
+.xrbar button {
+  font-family: var(--disp); font-weight: 700; font-size: 12px; letter-spacing: 0.3em; padding: 8px 14px 8px 16px; cursor: pointer;
+  color: var(--cyan); background: rgba(0, 240, 255, 0.06); border: 1px solid var(--cyan); text-shadow: 0 0 8px var(--cyan);
+  box-shadow: 0 0 14px rgba(0, 240, 255, 0.25), inset 0 0 10px rgba(0, 240, 255, 0.12); transition: all 0.2s;
+}
+.xrbar button:hover { background: var(--cyan); color: #000; text-shadow: none; }

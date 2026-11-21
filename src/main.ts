@@ -21,6 +21,7 @@ import { R2Socket, r2Status } from './net/socket';
 import { audio } from './audio/audio';
 import { Model } from './model';
 import { NavHistory, type NavEntry } from './nav';
+import { XRMode } from './xr/xr';
 import { hex, type InfoMsg } from './types';
 
 const R2_COMMANDS = ['afl', 'aflj', 'afi', 'pdf', 'pd', 'px', 'pxw', 'pxq', 's', 'iz', 'izz', 'ii', 'iS', 'is', 'ie', 'iI', 'i', 'p=e', 'axt', 'axf', 'agf', 'agc', 'VV', 'iE', 'il', 'ir', '?v', 'f', 'fs', 'afn', 'afv', 'pds', 'pdc', 'ps', 'iZ'];
@@ -86,6 +87,11 @@ class App {
     this.world = new World(document.getElementById('gl') as HTMLCanvasElement);
     this.world.engine.controls.autoRotate = true;
     this.world.engine.controls.autoRotateSpeed = 0.35;
+    // headset controllers reuse the desktop shortcuts, so XR goes through the same navigation lane
+    new XRMode(this.world, {
+      key: (key) => document.body.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true })),
+      status: () => ({ sel: this.sel, seek: this.seek, depth: this.depth, ready: this.ready }),
+    });
   }
 
   // =================================================================== boot

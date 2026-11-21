@@ -41,7 +41,7 @@ export function createMotes(count = 5000, radius = 900, height = 420) {
         p.x += sin(uTime * 0.2 + aSeed * 40.0) * 6.0;
         p.z += cos(uTime * 0.17 + aSeed * 30.0) * 6.0;
         vec4 mv = modelViewMatrix * vec4(p, 1.0);
-        vDist = -mv.z;
+        vDist = -mv.z / length(viewMatrix[0].xyz); // world units, also under a scaled XR rig
         gl_Position = projectionMatrix * mv;
         float tw = 0.5 + 0.5 * sin(uTime * (1.5 + aSeed * 4.0) + aSeed * 60.0);
         gl_PointSize = (1.2 + aSeed * 2.6) * uPixel * (300.0 / max(vDist, 1.0)) * (0.6 + tw * 0.6);
@@ -133,11 +133,11 @@ export function createHexRain(columns = 70, perColumn = 26, radius = 700) {
         float y = top - head + k * glyphH;
         vec3 center = vec3(aOff.x, y, aOff.y);
         // camera-facing billboard
-        vec3 right = vec3(viewMatrix[0][0], viewMatrix[1][0], viewMatrix[2][0]);
+        vec3 right = normalize(vec3(viewMatrix[0][0], viewMatrix[1][0], viewMatrix[2][0]));
         vec3 up = vec3(0.0, 1.0, 0.0);
         vec3 p = center + right * position.x * 2.6 + up * position.y * 2.6;
         vec4 mv = viewMatrix * vec4(p, 1.0);
-        vDist = -mv.z;
+        vDist = -mv.z / length(viewMatrix[0].xyz); // world units, also under a scaled XR rig
         gl_Position = projectionMatrix * mv;
         vUv = uv;
         float t = floor(uTime * (4.0 + mod(cid, 5.0)) + k * 7.0 + cid);

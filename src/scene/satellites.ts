@@ -73,7 +73,7 @@ export class ImportRing {
           w.y += sin(uTime * 0.7 + aSeed * 20.0) * 1.2;
           vW = w.xyz;
           vec4 mv = viewMatrix * w;
-          vDist = -mv.z;
+          vDist = -mv.z / length(viewMatrix[0].xyz); // world units, also under a scaled XR rig
           gl_Position = projectionMatrix * mv;
         }`,
       fragmentShader: /* glsl */ `

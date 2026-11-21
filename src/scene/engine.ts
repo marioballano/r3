@@ -1,5 +1,7 @@
 import * as THREE from 'three';
+import gsap from 'gsap';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+import { globals } from '../shaders/common';
 import {
   BlendFunction,
   BloomEffect,
@@ -85,6 +87,19 @@ class CyberEffect extends Effect {
 
 export type Updater = (dt: number, t: number) => void;
 
+/** Installed by the WebXR layer: runs around the frame while an immersive session is presenting. */
+export interface XRHooks {
+  /** headset camera to render with (a child of the XR rig) */
+  camera: THREE.PerspectiveCamera;
+  /** before the updaters: controller input, locomotion, sync the virtual camera from the head */
+  before(dt: number): void;
+  /** after the updaters: move the rig to follow camera flights */
+  after(dt: number): void;
+}
+
+/** Headsets have no use for a desktop-sized MSAA backbuffer, but the XR layer inherits the context's antialias flag. */
+const XR_BROWSER = /OculusBrowser|Quest|Pico|Wolvic/i.test(navigator.userAgent);
+
 export class Engine {
   renderer: THREE.WebGLRenderer;
   scene = new THREE.Scene();
@@ -102,9 +117,11 @@ export class Engine {
   autoQuality = true;
   idleOrbit = true;
   rig: { update(dt: number): void } | null = null;
+  xr: XRHooks | null = null;
 
   constructor(canvas: HTMLCanvasElement) {
-    this.renderer = new THREE.WebGLRenderer({ canvas, antialias: false, powerPreference: 'high-performance', stencil: false, depth: true });
+    this.renderer = new THREE.WebGLRenderer({ canvas, antialias: XR_BROWSER, powerPreference: 'high-performance', stencil: false, depth: true });
+    this.renderer.xr.enabled = true;
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.renderer.setSize(window.innerWidth, window.innerHeight);
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
@@ -178,7 +195,14 @@ export class Engine {
     else this.camera.setViewOffset(w, h, this.shiftTween.v, 0, w, h);
   }
 
+  /** an immersive WebXR session is rendering */
+  get presenting() {
+    return this.renderer.xr.isPresenting;
+  }
+
   resize() {
+    if (this.presenting) return; // the XR layer owns the framebuffer size
+    globals.uRes.value.set(window.innerWidth, window.innerHeight);
     const w = window.innerWidth;
     const h = window.innerHeight;
     this.camera.aspect = w / h;
@@ -220,19 +244,29 @@ export class Engine {
   }
 
   start() {
-    const loop = () => {
-      requestAnimationFrame(loop);
+    // setAnimationLoop runs on window rAF on the desktop and on the XR session's rAF in a headset
+    this.renderer.setAnimationLoop(() => {
       const dt = Math.min(this.clock.getDelta(), 0.1);
       this.time += dt;
       this.cyber.u('uTime').value = this.time;
-      if (this.idleOrbit && this.controls.enabled && this.idleSeconds > 45) this.controls.autoRotate = true;
+      const xr = this.presenting ? this.xr : null;
+      if (xr) {
+        // the browser stops window rAF during an immersive session, which would freeze every gsap flight
+        gsap.ticker.tick();
+        xr.before(dt);
+      } else if (this.idleOrbit && this.controls.enabled && this.idleSeconds > 45) this.controls.autoRotate = true;
       for (const u of this.updaters) u(dt, this.time);
+      if (xr) {
+        xr.after(dt);
+        // postprocessing can't target the XR framebuffer: render straight to it (tone mapping moves into the materials)
+        this.renderer.render(this.scene, xr.camera);
+        return;
+      }
       if (this.rig) this.rig.update(dt);
       else this.controls.update(dt);
       this.composer.render(dt);
       this.trackPerf(dt);
-    };
-    loop();
+    });
   }
 
   private trackPerf(dt: number) {

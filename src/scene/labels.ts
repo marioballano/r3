@@ -121,13 +121,16 @@ export class LabelField {
           vec3 c = aPos.xyz;
           c.y += sin(uTime * 0.4 + aPos.w * 30.0) * uDrift;
           c.x += cos(uTime * 0.3 + aPos.w * 20.0) * uDrift * 0.6;
+          // normalised: a scaled WebXR rig puts a uniform scale into the view matrix
           vec3 right = vec3(viewMatrix[0][0], viewMatrix[1][0], viewMatrix[2][0]);
-          vec3 up = vec3(viewMatrix[0][1], viewMatrix[1][1], viewMatrix[2][1]);
-          float dc = -(viewMatrix * vec4(c, 1.0)).z;
+          float vs = length(right);
+          right /= vs;
+          vec3 up = vec3(viewMatrix[0][1], viewMatrix[1][1], viewMatrix[2][1]) / vs;
+          float dc = -(viewMatrix * vec4(c, 1.0)).z / vs;
           float s = (1.0 + aHi * 0.35) * clamp(dc / uShrink, 0.28, 1.0);
           vec3 p = c + right * position.x * aSize.x * s + up * position.y * aSize.y * s;
           vec4 mv = viewMatrix * vec4(p, 1.0);
-          vDist = -mv.z;
+          vDist = -mv.z / length(viewMatrix[0].xyz); // world units, also under a scaled XR rig
           gl_Position = projectionMatrix * mv;
           vUv = aRect.xy + uv * aRect.zw;
           vColor = aColor;

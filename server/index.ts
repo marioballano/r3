@@ -10,7 +10,8 @@ import { WebSocketServer } from 'ws';
 import { listDir } from './fsbrowse.js';
 import { Session } from './session.js';
 
-const HOST = process.env.R3_HOST ?? '127.0.0.1';
+// R3_LAN=1 opens r3 to the network (a headset on Wi-Fi); an explicit R3_HOST still wins
+const HOST = process.env.R3_HOST ?? (process.env.R3_LAN ? '0.0.0.0' : '127.0.0.1');
 const PORT = Number(process.env.R3_PORT ?? 3133);
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 

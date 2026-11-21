@@ -105,14 +105,15 @@ export function createGround(engine: Engine) {
 
   const origBefore = ground.onBeforeRender;
   ground.onBeforeRender = function (this: Reflector, ...args: Parameters<typeof origBefore>) {
-    if (engine.quality >= 1) origBefore.apply(this, args);
+    // in a headset the reflection would re-render the whole city once per eye: skip it
+    if (engine.quality >= 1 && !engine.presenting) origBefore.apply(this, args);
   } as typeof origBefore;
 
   const u = ground.material.uniforms;
   let pulseT = -1;
   engine.add((dt, t) => {
     u.uTime.value = t;
-    u.uReflect.value = engine.quality >= 1 ? 1 : 0;
+    u.uReflect.value = engine.quality >= 1 && !engine.presenting ? 1 : 0;
     if (pulseT >= 0) {
       pulseT += dt / 2.2;
       u.uPulse.value = Math.min(pulseT, 1);

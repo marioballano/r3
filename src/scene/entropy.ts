@@ -77,7 +77,7 @@ export class EntropyHalo {
           vVal = aVal;
           vMark = 1.0 - smoothstep(0.0, 0.012, abs(aIdx - uMarker));
           vec4 mv = viewMatrix * modelMatrix * instanceMatrix * vec4(p, 1.0);
-          vDist = -mv.z;
+          vDist = -mv.z / length(viewMatrix[0].xyz); // world units, also under a scaled XR rig
           gl_Position = projectionMatrix * mv;
         }`,
       fragmentShader: /* glsl */ `
