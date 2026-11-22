@@ -12,5 +12,15 @@
     "skipLibCheck": true,
     "noUnusedLocals": true
   },
-  "include": ["server", "scripts", "vite.config.ts"]
+  "include": [
+    "server",
+    "scripts",
+    "vite.config.ts",
+    "src/net/client.ts",
+    "src/net/session.ts",
+    "src/net/graph.ts",
+    "src/types.ts",
+    "src/net/wasm-runtime.ts",
+    "src/net/entropy.ts"
+  ]
 }

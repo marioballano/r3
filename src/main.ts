@@ -18,6 +18,8 @@ import { Palette, type PaletteItem } from './ui/palette';
 import { Minimap } from './ui/minimap';
 import { corners, esc, h } from './ui/dom';
 import { R2Socket, r2Status } from './net/socket';
+import type { R2Client } from './net/client';
+import { nativeConfig, nativeRequest, createNativeClient } from './net/native';
 import { audio } from './audio/audio';
 import { Model } from './model';
 import { NavHistory, type NavEntry } from './nav';
@@ -69,7 +71,7 @@ class App {
   palette!: Palette;
   minimap!: Minimap;
   nav = new NavHistory();
-  sock: R2Socket | null = null;
+  sock: R2Client | null = null;
   info: InfoMsg | null = null;
   model: Model | null = null;
   sel: number | null = null;
@@ -97,6 +99,32 @@ class App {
   // =================================================================== boot
   async boot() {
     const params = new URLSearchParams(location.search);
+    const native = nativeConfig();
+    if (native) {
+      const start = h('button', { class: 'jack' }, native.path || native.endpoint ? 'JACK IN' : native.mode === 'http' ? 'CONNECT TO R2 SERVER' : 'OPEN BINARY');
+      const remote = h('button', { class: 'btn' }, 'CONNECT TO R2 SERVER');
+      const boot = h('div', { class: 'boot' }, h('div', { class: 'logo glitch', 'data-text': 'r3' }, 'r3'),
+        h('div', { class: 'tag' }, 'radare2 · three-dimensional'),
+        h('div', { class: 'ver' }, native.mode === 'http' ? '◉ remote HTTP' : native.mode === 'pipe' ? '◉ local r2pipe' : '◉ embedded radare2.wasm'), start, remote,
+        h('div', { class: 'hint' }, 'drop a binary · ⌘O open · ⌘T new tab · ⌘L connect'));
+      if (!native.path && !native.endpoint) {
+        const backend = h('select', { class: 'btn', 'aria-label': 'Analysis backend' });
+        for (const [value, label] of [['wasm', 'WebAssembly (bundled)'], ['pipe', 'r2pipe (spawn local r2)'], ['http', 'Remote HTTP server']]) {
+          const option = h('option', { value }, label); option.selected = native.mode === value; backend.append(option);
+        }
+        backend.onchange = () => { void nativeRequest('backend', { mode: backend.value }); };
+        boot.insertBefore(backend, start);
+      }
+      this.ui.append(boot);
+      remote.onclick = () => { void nativeRequest('connect'); };
+      start.onclick = async () => {
+        if (!native.path && !native.endpoint) { await nativeRequest(native.mode === 'http' ? 'connect' : 'pick'); return; }
+        boot.remove();
+        await audio.start();
+        this.openBinary(native.path ?? native.endpoint!);
+      };
+      return;
+    }
     const st = await r2Status();
     this.version = st.version ?? '';
     this.home = st.home;
@@ -182,6 +210,7 @@ class App {
   }
 
   async pick() {
+    if (nativeConfig()) { await nativeRequest('pick'); return; }
     this.mountHud();
     this.hud.setView('SELECT TARGET');
     const path = await showPicker(this.ui, { version: this.version, home: this.home });
@@ -193,10 +222,24 @@ class App {
     if (this.world.view !== 'city') await this.world.backToCity();
     this.sock?.close();
     this.ready = false;
+    this.info = null;
+    this.seek = null;
+    this.walk = [];
+    this.nav = new NavHistory();
+    this.nav.onChange = () => this.renderCrumbs();
     this.model = null;
     this.sel = null;
     this.inspector.toggle(false, false);
-    const sock = (this.sock = new R2Socket());
+    let sock: R2Client;
+    try {
+      this.hud.setView('LOADING ENGINE');
+      sock = nativeConfig() ? await createNativeClient(nativeConfig()!) : new R2Socket();
+      this.sock = sock;
+    } catch (e) {
+      this.hud.logLine(`✖ ${(e as Error).message}`);
+      this.hud.caption('ENGINE FAILED', (e as Error).message);
+      return;
+    }
     this.hud.setView('JACKING IN');
     this.hud.logLine(`target :: ${path}`);
     audio.setMood('loading');
@@ -253,7 +296,7 @@ class App {
       if (this.sock === sock) this.hud.logLine('✖ link lost');
     };
     try {
-      await sock.open(path);
+      await sock.open(path, nativeConfig()?.analysis);
     } catch (e) {
       sock.on.error?.((e as Error).message);
     }

@@ -1,5 +1,5 @@
 import type { Model } from '../model';
-import type { R2Socket } from '../net/socket';
+import type { R2Client } from '../net/client';
 import { hex, type InspectMsg, type Op } from '../types';
 import { opColor } from '../scene/funcview';
 import { audio } from '../audio/audio';
@@ -54,7 +54,7 @@ export class Inspector {
 
   constructor(
     root: HTMLElement,
-    private sock: () => R2Socket | null,
+    private sock: () => R2Client | null,
     private model: () => Model | null,
     private host: InspectorHost,
   ) {

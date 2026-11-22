@@ -3,3 +3,5 @@ dist
 *.tsbuildinfo
 shots/
 .DS_Store
+
+app/mac/build/

@@ -218,7 +218,7 @@ export class EntropyHalo {
   entropyAt(vaddr: number): number {
     const d = this.data;
     const p = this.vaddrToPaddr(vaddr);
-    if (!d || p === null || !d.entropy.length) return 0.5;
+    if (!d || p === null || !d.entropy?.length) return 0.5;
     const i = Math.floor((p - d.address) / Math.max(1, d.blocksize));
     return (d.entropy[Math.max(0, Math.min(d.entropy.length - 1, i))]?.value ?? 128) / 255;
   }

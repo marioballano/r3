@@ -4,6 +4,7 @@ import { hex, type Block, type FnGraph, type Op } from '../types';
 import { LabelField } from './labels';
 import { Ribbons, type RibbonSpec } from './ribbons';
 import type { LayoutReq, LayoutRes } from './cfg.worker';
+import CFGWorker from './cfg.worker?worker&inline';
 
 const FONT_PX = 22;
 const LINE_H = 30;
@@ -250,7 +251,7 @@ export class FuncView {
       edges: this.edges.map((e, i) => ({ v: String(e.from), w: String(e.to), name: `e${i}`, weight: e.kind === 'fail' ? 3 : e.kind === 'uncond' ? 2 : 1 })),
     };
     const res = await new Promise<LayoutRes>((resolve, reject) => {
-      const w = new Worker(new URL('./cfg.worker.ts', import.meta.url), { type: 'module' });
+      const w = new CFGWorker();
       w.onmessage = (ev) => {
         resolve(ev.data);
         w.terminate();
