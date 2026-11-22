@@ -49,6 +49,20 @@ npm start              # serves dist/ + API on http://localhost:3133
 The server binds to `127.0.0.1`. Set `R3_HOST` / `R3_PORT` to change that. The server browses the host
 filesystem, so don't expose it to the internet.
 
+## Native macOS app
+
+```sh
+make -C app/mac        # builds app/mac/build/r3.app and app/mac/build/r3.dmg
+```
+
+The app bundles this WebGL UI and the latest official radare2 WASM command API.
+WASM analysis works offline without an installed r2, Node, or a webserver.
+The Backend menu also offers an optional local r2pipe process.
+Open or drop binaries, choose analysis depth, and keep independent sessions in
+native tabs. Cmd+L connects another tab to an existing r2 HTTP server using
+`POST /cmd/`. See [app/mac/README.md](app/mac/README.md) for build requirements,
+shortcuts, updating WASM, and integration checks.
+
 ## The world
 
 | What | r2 source | How it's drawn |

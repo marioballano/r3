@@ -23,6 +23,7 @@ function selfSigned() {
 if (LAN) console.warn('\x1b[33m[r3] R3_LAN: serving on the network over HTTPS. Anyone on it can browse this host\'s files through r3.\x1b[0m');
 
 export default defineConfig({
+  base: './',
   server: {
     host: LAN ? '0.0.0.0' : '127.0.0.1',
     https: LAN ? selfSigned() : undefined,

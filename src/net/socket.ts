@@ -1,25 +1,12 @@
-import type { FnGraph, FunctionsMsg, InfoMsg, InspectMsg } from '../types';
+import type { FnGraph, InspectMsg } from '../types';
 
-export interface OutMsg {
-  t: 'out';
-  id: number;
-  text: string;
-  seek: number | null;
-  err?: boolean;
-}
+import type { Analysis, Handlers, OutMsg, R2Client } from './client';
+export type { OutMsg } from './client';
 
-type Handlers = {
-  status: (msg: string, progress: number) => void;
-  info: (m: InfoMsg) => void;
-  functions: (m: FunctionsMsg) => void;
-  error: (msg: string) => void;
-  close: () => void;
-};
-
-export class R2Socket {
+export class R2Socket implements R2Client {
   private ws: WebSocket;
   private nextId = 1;
-  private waiting = new Map<number, (m: any) => void>();
+  private waiting = new Map<number, { resolve: (m: any) => void; reject: (e: Error) => void; timer: ReturnType<typeof setTimeout> }>();
   private opened: Promise<void>;
   on: Partial<Handlers> = {};
 
@@ -30,7 +17,7 @@ export class R2Socket {
       this.ws.onopen = () => res();
       this.ws.onerror = () => rej(new Error('websocket error'));
     });
-    this.ws.onclose = () => this.on.close?.();
+    this.ws.onclose = () => { this.failPending(new Error('Connection closed')); this.on.close?.(); };
     this.ws.onmessage = (ev) => {
       const m = JSON.parse(ev.data);
       switch (m.t) {
@@ -46,22 +33,25 @@ export class R2Socket {
           const w = this.waiting.get(m.id);
           if (w) {
             this.waiting.delete(m.id);
-            w(m);
+            clearTimeout(w.timer);
+            if (m.t === 'failure') w.reject(new Error(m.msg)); else w.resolve(m);
           }
         }
       }
     };
   }
 
-  async open(path: string) {
+  async open(path: string, analysis: Analysis = 'auto') {
     await this.opened;
-    this.ws.send(JSON.stringify({ t: 'open', path }));
+    this.ws.send(JSON.stringify({ t: 'open', path, analysis }));
   }
 
   private req<T>(obj: Record<string, unknown>): Promise<T> {
     const id = this.nextId++;
-    return new Promise((resolve) => {
-      this.waiting.set(id, resolve);
+    if (this.ws.readyState !== WebSocket.OPEN) return Promise.reject(new Error('Connection is not open'));
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => { this.waiting.delete(id); reject(new Error('r2 request timed out')); }, 120_000);
+      this.waiting.set(id, { resolve, reject, timer });
       this.ws.send(JSON.stringify({ ...obj, id }));
     });
   }
@@ -90,7 +80,13 @@ export class R2Socket {
     return m.graph;
   }
 
+  private failPending(error: Error) {
+    for (const request of this.waiting.values()) { clearTimeout(request.timer); request.reject(error); }
+    this.waiting.clear();
+  }
+
   close() {
+    this.failPending(new Error('Session closed'));
     this.on = {};
     this.ws.close();
   }
