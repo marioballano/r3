@@ -6,11 +6,13 @@ APP = $(BUILD)/r3.app
 BIN = $(APP)/Contents/MacOS/r3
 RESOURCES = $(APP)/Contents/Resources
 DMG = $(BUILD)/r3.dmg
+DIST_DMG = $(BUILD)/r3-release.dmg
 SWIFTFLAGS ?= -O -target $(shell uname -m)-apple-macosx11.0
 SIGN_IDENTITY ?= -
+NOTARY_PROFILE ?= r3-notary
 export CLANG_MODULE_CACHE_PATH := $(abspath $(BUILD)/module-cache)
 
-.PHONY: all app webui wasm update-wasm run check check-ui check-remote check-pipe clean
+.PHONY: all app webui wasm update-wasm distdmg run check check-ui check-remote check-pipe clean
 all: $(DMG)
 app: $(BIN) webui $(RESOURCES)/r3.icns
 $(BIN): Main.swift App.swift Assets.swift PipeBackend.swift Info.plist
@@ -45,6 +47,8 @@ $(DMG): app
 	codesign --verify --deep --strict $(BUILD)/dmg/r3.app
 	ln -sfn /Applications $(BUILD)/dmg/Applications
 	hdiutil create -ov -volname r3 -srcfolder $(BUILD)/dmg -format UDZO $@
+distdmg: app
+	sh distdmg.sh "$(APP)" "$(DIST_DMG)" "$(SIGN_IDENTITY)" "$(NOTARY_PROFILE)"
 run: app
 	$(BIN) $(FILE)
 check: ../../node_modules/.package-lock.json wasm

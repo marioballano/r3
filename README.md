@@ -53,6 +53,7 @@ filesystem, so don't expose it to the internet.
 
 ```sh
 make -C app/mac        # builds app/mac/build/r3.app and app/mac/build/r3.dmg
+make distdmg          # builds app/mac/build/r3-release.dmg with notarization
 ```
 
 The app bundles this WebGL UI and the latest official radare2 WASM command API.

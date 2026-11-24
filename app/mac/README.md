@@ -73,9 +73,30 @@ make run FILE=/bin/ls
 ```
 
 Builds target the current machine's architecture. Override `SWIFTFLAGS` to
-cross-compile the small Swift host. The generated app is ad-hoc signed by
-default; use `make SIGN_IDENTITY='Developer ID Application: …'` to select a
-signing identity. Public distribution requires your own signing/notarization.
+cross-compile the small Swift host. The default DMG build uses ad-hoc signing
+unless you set `SIGN_IDENTITY`.
+
+## Distribution DMG
+
+Install your **Developer ID Application** certificate and private key in
+Keychain. On the release Mac, create a notarization profile once. Enter an Apple
+app-specific password when prompted.
+
+```sh
+xcrun notarytool store-credentials r3-notary \
+  --apple-id 'you@example.com' --team-id 'TEAMID'
+```
+
+Run `make distdmg` here or from the repository root. The target signs the app
+with the hardened runtime, signs the disk image, and submits it for notarization.
+After stapling and validating the ticket, it writes `app/mac/build/r3-release.dmg`
+relative to the repository root. It preserves any previous release image if a
+step fails.
+
+If more than one Developer ID Application identity is available, select one
+with `make distdmg SIGN_IDENTITY='Developer ID Application: Name (TEAMID)'`.
+You can also set `SIGN_IDENTITY` to the certificate's SHA-1 fingerprint.
+Use `NOTARY_PROFILE=your-profile` to select a different Keychain profile.
 
 The native window/tab/drag-and-drop code is adapted from
 `radare2-webui/src/macos` (LGPL-3.0); its attribution and license summary are
