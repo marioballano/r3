@@ -10,6 +10,7 @@
 
 typedef struct {
 	RCore *core;
+	bool owns_core;
 	char *endpoint, *name;
 	char error[256];
 } Backend;
@@ -114,7 +115,9 @@ static inline int image_yscale(const App *a) { return a->image_mode == 'b' || a-
 static inline const RJson *json_field(const RJson *json, const char *key) { return json && json->type == R_JSON_OBJECT? r_json_get (json, key): NULL; }
 static inline const char *json_string(const RJson *json, const char *key) { const RJson *v = json_field (json, key); return v && v->type == R_JSON_STRING? v->str_value: NULL; }
 
+int r3c_run(int argc, const char **argv, RCore *core, RCons *output);
 bool backend_open(Backend *backend, const char *path, const char *url, const char *analysis);
+bool backend_analyze(Backend *backend, const char *analysis);
 char *backend_command(Backend *backend, const char *command);
 RJson *backend_json(Backend *backend, const char *command);
 void backend_close(Backend *backend);

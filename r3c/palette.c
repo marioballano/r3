@@ -77,6 +77,7 @@ bool app_next_theme(App *a) {
 	if (!a->backend.core && !a->backend.endpoint && a->demo) {
 		a->backend.core = r_core_new ();
 		if (a->backend.core) {
+			a->backend.owns_core = true;
 			r_config_set_i (a->backend.core->config, "scr.color", 3);
 			r_config_set_b (a->backend.core->config, "scr.interactive", false);
 			r_config_set_b (a->backend.core->config, "scr.utf8", false);

@@ -21,6 +21,18 @@ For a local HTTP server, for example:
 r2 -e http.bind=127.0.0.1 -e http.port=9090 -c 'aaa;=h' /bin/ls
 ```
 
+## radare2 core plugin
+
+`make` builds the standalone executable and the plugin. Use `make plugin` to build just `build/core_r3c.so` on Linux or `build/core_r3c.dylib` on macOS. Open a binary in radare2 and load the plugin with `L`. For example, on Linux, from this directory:
+
+```text
+L build/core_r3c.so
+aa
+r3c
+```
+
+`r3c` uses the open file and current analysis. It selects the function at the current seek when one is available. Use `-A aa` or `-A aaa` to run analysis in the current session, `r3c?` for help, `r3c -j` for JSON, or `r3c -s 120x40 -p` for a plain-text snapshot. Press `q` then `y` to return to the radare2 prompt.
+
 ## Rendering
 
 Colored Braille is the default. `-m` selects a startup mode; `m` cycles forward and `M` cycles backward while running. The current mode appears in the header.
@@ -94,6 +106,6 @@ make check
 
 `-s WxH` renders one frame and exits; `-t seconds` sets its animation time. `-p` omits ANSI colors from snapshots; `-m mono` makes the scene monochrome while retaining colored text. `-j` dumps function, basic-block and attributed call data as JSON. `-r fps` changes the interactive frame rate.
 
-Checks cover the independent engine, native model loading, graph layout, all image modes, foreground/background color conversion, entropy colors, theme cycling, HTTP POST behavior, a real r2 HTTP server, terminal resize, mouse input and terminal restoration. Python 3 is needed for smoke tests. HTTP tests bind localhost ports.
+Checks cover the independent engine, native model loading, graph layout, all image modes, foreground/background color conversion, entropy colors, theme cycling, core plugin loading and session reuse, HTTP POST behavior, a real r2 HTTP server, terminal resize, mouse input and terminal restoration. Python 3 is needed for smoke tests. HTTP tests bind localhost ports.
 
 The reusable renderer lives in [`engine/`](engine/README.md). The frontend implements the terminal navigation and analysis views; it does not reproduce browser-specific XR or audio features of the TypeScript application.

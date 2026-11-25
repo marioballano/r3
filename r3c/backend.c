@@ -76,6 +76,7 @@ bool backend_open(Backend *b, const char *path, const char *url, const char *ana
 		if (!b->core) {
 			return false;
 		}
+		b->owns_core = true;
 		r_config_set_i (b->core->config, "scr.color", 3);
 		r_config_set_b (b->core->config, "scr.interactive", false);
 		r_config_set_i (b->core->config, "scr.maxpage", 0);
@@ -92,6 +93,10 @@ bool backend_open(Backend *b, const char *path, const char *url, const char *ana
 		}
 		b->name = ascii_copy (path);
 	}
+	return backend_analyze (b, analysis);
+}
+
+bool backend_analyze(Backend *b, const char *analysis) {
 	if (analysis && strcmp (analysis, "none")) {
 		char *result = backend_command (b, analysis);
 		if (!result) {
@@ -103,7 +108,9 @@ bool backend_open(Backend *b, const char *path, const char *url, const char *ana
 }
 
 void backend_close(Backend *b) {
-	r_core_free (b->core);
+	if (b->owns_core) {
+		r_core_free (b->core);
+	}
 	free (b->endpoint);
 	free (b->name);
 	memset (b, 0, sizeof (*b));

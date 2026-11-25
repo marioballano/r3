@@ -12,6 +12,7 @@ import signal
 import socket
 import struct
 import subprocess
+import sys
 import termios
 import threading
 import time
@@ -63,6 +64,42 @@ for view in ('city', 'graph', 'cfg'):
     assert b'\x1b' not in result.stdout
     assert b'Do you want to print' not in result.stdout + result.stderr
 print('real binary: city, constellation and CFG snapshots passed')
+
+
+def plugin_session(plugin):
+    r2 = shutil.which('radare2')
+    if not r2:
+        print('core plugin: skipped (radare2 executable unavailable)')
+        return
+    seek = local['functions'][names[dispatch]]['addr']
+    renamed = 'r3c.fixture_dispatch'
+    commands = [f'L {plugin}', 'r3c?~Usage', 'r3c -j', 'r3c -A aa -j',
+                f'afn {renamed} {seek:#x}', f's {seek + 4:#x}', 'r3c -j',
+                'r3c -s 120x30 -p -v cfg', f'r3c -s 120x30 -p -v cfg -f "{main}"~DISASSEMBLY',
+                'r3c -j~{title}', 's', 'e scr.color', 'e asm.bytes']
+    command_args = [arg for command in commands for arg in ('-c', command)]
+    result = subprocess.run([r2, '-NN', '-q', '-e', 'scr.color=0', '-e', 'asm.bytes=true',
+                             *command_args, str(FIXTURE)], capture_output=True, timeout=40)
+    assert result.returncode == 0, result.stderr
+    assert b'ERROR' not in result.stderr and b'assertion' not in result.stderr, result.stderr
+    lines = result.stdout.decode().splitlines()
+    assert 'Visualize the current radare2 session' in lines[0]
+    assert json.loads(lines[1])['functions'] == []
+    assert {f['name'] for f in json.loads(lines[2])['functions']} == set(names)
+    assert renamed in {f['name'] for f in json.loads(lines[3])['functions']}
+    frame = lines[4:34]
+    assert all(len(line) == 120 for line in frame)
+    assert 'CONTROL FLOW' in frame[1] and 'DISASSEMBLY' in frame[2]
+    assert frame[-1].strip().startswith(renamed + ' '), frame[-1]
+    assert 'DISASSEMBLY' in lines[34]
+    assert Path(lines[35]).resolve() == FIXTURE
+    assert int(lines[36], 16) == seek + 4
+    assert lines[37:] == ['0', 'true']
+    print('core plugin: existing analysis, current seek, CFG, command capture and host settings passed')
+
+
+if len(sys.argv) > 1:
+    plugin_session(Path(sys.argv[1]).resolve())
 
 
 class RecordingServer(http.server.ThreadingHTTPServer):

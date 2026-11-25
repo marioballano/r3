@@ -400,8 +400,7 @@ void terminal_present(App *a) {
 	}
 	if (colors) { r_strbuf_append (&out, Color_RESET); }
 	r_cons_print (a->cons, r_strbuf_get (&out));
-	a->cons->context->pageable = false;
-	r_cons_flush (a->cons);
+	if (!a->snapshot) { r_cons_flush (a->cons); }
 	r_strbuf_fini (&out);
 	memcpy (t->previous, t->cells, (size_t)t->width * t->height * sizeof (Cell));
 	t->repaint = false;
