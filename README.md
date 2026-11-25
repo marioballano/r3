@@ -53,6 +53,7 @@ filesystem, so don't expose it to the internet.
 
 ```sh
 make -C app/mac        # builds app/mac/build/r3.app and app/mac/build/r3.dmg
+make notary-setup     # one-time Keychain setup for distribution
 make distdmg          # builds app/mac/build/r3-release.dmg with notarization
 ```
 

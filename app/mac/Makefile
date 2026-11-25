@@ -10,9 +10,11 @@ DIST_DMG = $(BUILD)/r3-release.dmg
 SWIFTFLAGS ?= -O -target $(shell uname -m)-apple-macosx11.0
 SIGN_IDENTITY ?= -
 NOTARY_PROFILE ?= r3-notary
+export NOTARY_PROFILE SIGN_IDENTITY
 export CLANG_MODULE_CACHE_PATH := $(abspath $(BUILD)/module-cache)
 
-.PHONY: all app webui wasm update-wasm distdmg run check check-ui check-remote check-pipe clean
+.PHONY: all app webui wasm update-wasm distdmg notary-setup notary-profiles \
+	run check check-ui check-remote check-pipe clean
 all: $(DMG)
 app: $(BIN) webui $(RESOURCES)/r3.icns
 $(BIN): Main.swift App.swift Assets.swift PipeBackend.swift Info.plist
@@ -48,7 +50,14 @@ $(DMG): app
 	ln -sfn /Applications $(BUILD)/dmg/Applications
 	hdiutil create -ov -volname r3 -srcfolder $(BUILD)/dmg -format UDZO $@
 distdmg: app
-	sh distdmg.sh "$(APP)" "$(DIST_DMG)" "$(SIGN_IDENTITY)" "$(NOTARY_PROFILE)"
+	sh distdmg.sh "$(APP)" "$(DIST_DMG)" "$$SIGN_IDENTITY" "$$NOTARY_PROFILE"
+notary-setup:
+	@xcrun swift NotarySetup.swift "$$NOTARY_PROFILE" "$$SIGN_IDENTITY"
+notary-profiles:
+	@printf '%s\n' 'In Keychain Access, select iCloud or Local Items and search for com.apple.gke.notary.tool.' \
+		'Open an item and copy the part of Account after com.apple.gke.notary.tool.saved-creds.' \
+		"Then run make distdmg NOTARY_PROFILE='profile name'."
+	open -b com.apple.keychainaccess
 run: app
 	$(BIN) $(FILE)
 check: ../../node_modules/.package-lock.json wasm

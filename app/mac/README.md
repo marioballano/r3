@@ -79,24 +79,35 @@ unless you set `SIGN_IDENTITY`.
 ## Distribution DMG
 
 Install your **Developer ID Application** certificate and private key in
-Keychain. On the release Mac, create a notarization profile once. Enter an Apple
-app-specific password when prompted.
+Keychain. Run the setup once on the release Mac, then build the release DMG.
 
 ```sh
-xcrun notarytool store-credentials r3-notary \
-  --apple-id 'you@example.com' --team-id 'TEAMID'
+make notary-setup
+make distdmg
 ```
 
-Run `make distdmg` here or from the repository root. The target signs the app
-with the hardened runtime, signs the disk image, and submits it for notarization.
-After stapling and validating the ticket, it writes `app/mac/build/r3-release.dmg`
-relative to the repository root. It preserves any previous release image if a
-step fails.
+Both commands work here or from the repository root. Setup creates the
+`r3-notary` Keychain profile. For Apple Account authentication, it fills in the
+Team ID from your Developer ID Application certificate and the Apple Account
+from Xcode when it can match them. Apple prompts for the app-specific password
+and for any missing fields. To create the password, sign in to
+[your Apple Account](https://account.apple.com/) and select
+**Sign-In and Security → App-Specific Passwords**.
+
+`make distdmg` signs the app with the hardened runtime, signs the disk image,
+and submits it for notarization. After stapling and validating the ticket, it
+writes `app/mac/build/r3-release.dmg` relative to the repository root. It
+preserves any previous release image if a step fails.
+
+If you already have a profile, `make notary-profiles` opens Keychain Access.
+Select **iCloud** or **Local Items**, search for `com.apple.gke.notary.tool`,
+and open the matching item. The part of **Account** after
+`com.apple.gke.notary.tool.saved-creds.` is the profile name.
+Run `make distdmg NOTARY_PROFILE='profile name'` to use it.
 
 If more than one Developer ID Application identity is available, select one
 with `make distdmg SIGN_IDENTITY='Developer ID Application: Name (TEAMID)'`.
 You can also set `SIGN_IDENTITY` to the certificate's SHA-1 fingerprint.
-Use `NOTARY_PROFILE=your-profile` to select a different Keychain profile.
 
 The native window/tab/drag-and-drop code is adapted from
 `radare2-webui/src/macos` (LGPL-3.0); its attribution and license summary are

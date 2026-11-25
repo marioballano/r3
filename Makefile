@@ -1,4 +1,4 @@
-.PHONY: all distdmg
+.PHONY: all distdmg notary-setup notary-profiles
 
-all distdmg:
+all distdmg notary-setup notary-profiles:
 	$(MAKE) -C app/mac $@
