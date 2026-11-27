@@ -189,6 +189,59 @@ const yaw1 = await ev<number>(`(() => { const d = window.__r3.world.engine.camer
 const dy = Math.atan2(Math.sin(yaw1 - yaw0), Math.cos(yaw1 - yaw0));
 check(Math.abs(Math.abs(dy) - Math.PI / 6) < 0.05, 'snap-turned 30°', +((dy * 180) / Math.PI).toFixed(1));
 
+step('R grip + A → walk the streets');
+await ev(`__xr.button('right', 1, true)`);
+await press('right', 4);
+await ev(`__xr.button('right', 1, false)`);
+await frames();
+await page.waitForFunction(`window.__r3.world.rig.mode === 'walk'`, null, { timeout: 30_000 });
+await idle();
+await frames(6);
+const feet = () => ev<number>(`+window.__r3.world.engine.scene.getObjectByName('xr-rig').position.y.toFixed(2)`);
+s = await S();
+check(s.view === 'city' && s.rigS === 1, 'on foot in the city at life size', s);
+check(Math.abs(await feet()) < 0.05, 'feet on the street', await feet());
+// the street entrance closest to the eyes, and face it
+const door = `(() => { const c = window.__r3.world.engine.camera.position;
+  const t = [...window.__r3.world.city.towers].sort((a, b) => a.pos.clone().setY(0).setZ(a.pos.z + a.width / 2).distanceTo(c) - b.pos.clone().setY(0).setZ(b.pos.z + b.width / 2).distanceTo(c))[0];
+  return t; })()`;
+const doorFi = await ev<number>(`${door}.fnIndex`);
+await aim(`(() => { const t = ${door}; return t.pos.clone().setY(w.engine.camera.position.y).setZ(t.pos.z + t.width / 2); })()`);
+await frames(4);
+await shot('10-vr-street');
+
+step('L stick forward → through the arch into the building');
+await ev(`__xr.state.pitch = 0`);
+const walkE0 = (await S()).eye;
+await ev(`__xr.stick('left', 0, -1)`);
+const entered = await page.waitForFunction(`window.__r3.world.view === 'interior'`, null, { timeout: 60_000 }).then(() => true, () => false);
+await ev(`__xr.stick('left', 0, 0)`);
+await frames(6);
+await idle();
+s = await S();
+check(entered, 'walked into the building', { view: s.view, from: walkE0, to: s.eye });
+check(await ev<boolean>(`window.__r3.world.room?.plan.fi === ${doorFi}`), 'the room belongs to the tower walked into', doorFi);
+check(await ev<boolean>(`(() => { const w = window.__r3.world, rig = w.engine.scene.getObjectByName('xr-rig'); return Math.abs(rig.position.y - (w.rig.walkFloor - 1.55)) < 0.05; })()`), 'feet on the room floor');
+await aim(`(() => { const r = w.room; const e = r.exits.at(-1); return e ? new (w.engine.camera.position.constructor)(e.x, w.engine.camera.position.y, e.z) : w.engine.camera.position.clone().add(new (w.engine.camera.position.constructor)(0, 0, -1)); })()`);
+await frames(6);
+await shot('11-vr-room');
+
+step('B → back to the street');
+await press('right', 5);
+await page.waitForFunction(`window.__r3.world.view === 'city'`, null, { timeout: 30_000 });
+await idle();
+await frames(4);
+s = await S();
+check(s.view === 'city' && (await ev<string>(`window.__r3.world.rig.mode`)) === 'walk', 'back on the street, still on foot', s);
+check(Math.abs(await feet()) < 0.05, 'feet on the street again', await feet());
+
+step('B → back to orbit');
+await press('right', 5);
+await page.waitForFunction(`window.__r3.world.rig.mode === 'orbit'`, null, { timeout: 30_000 }).catch(() => {});
+await idle();
+check((await ev<string>(`window.__r3.world.rig.mode`)) === 'orbit', 'walk ended');
+check(await ev<boolean>(`!window.__r3.world.engine.controls.enabled`), 'orbit controls stay off in the headset');
+
 step('exit');
 await ev(`__xr.session.end()`);
 await wait(1500);

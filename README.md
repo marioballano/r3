@@ -194,6 +194,9 @@ WebXR needs a secure context, so the headset has to open r3 either on `localhost
 | left stick (+ grip to boost) | fly where you look |
 | right stick | snap turn 30° · rise / sink |
 | right grip + right-stick flick | core: walk the control flow (↓ fall-through, → taken, ↑ predecessor, ← back) |
+| right grip + A | city: walk the streets (like `G`), and back to orbit |
+| on foot: left stick (+ grip to run) | walk where you look; walk through a lit arch to enter its building |
+| on foot: A · B | enter the door in front, or take the room exit you face · back to the street, then back to orbit |
 | left stick click · right stick click | focus depth 1/2/3 · overview |
 
 A card follows the ray with what it points at. A display above the left controller shows the view, the selection

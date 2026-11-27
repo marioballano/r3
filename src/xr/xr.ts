@@ -4,6 +4,7 @@ import { globals } from '../shaders/common';
 import { audio } from '../audio/audio';
 import { hex } from '../types';
 import { TextPanel } from './panel';
+import { EYE_HEIGHT } from '../scene/interior';
 
 /**
  * WebXR: fly through the binary in a headset (VR) or over a table in your room (MR passthrough).
@@ -19,6 +20,11 @@ const SCALES: Scale[] = ['life', 'giant', 'table'];
 /** stick speed in metres per second at each scale (multiplied by the rig scale into world units) */
 const SPEED: Record<Scale, number> = { life: 25, giant: 4, table: 0.5 };
 const GIANT = 12;
+/** on foot (walk mode), metres per second: walking, and running with the left grip */
+const WALK = 3.5;
+const RUN = 9;
+/** sub-step length for walk collisions (as on the desktop: arches and doorways are thin) */
+const WALK_STEP = 0.13;
 /** nominal eye-buffer size that screen-space line widths are measured against in the headset */
 const EYE_PX = 1400;
 
@@ -141,6 +147,10 @@ export class XRMode {
   private blink: { t: number; turn: number; done: boolean } | null = null;
   private vig = 0;
   private vel = new THREE.Vector3();
+  /** fade back in after a teleport (uBlink) */
+  private fade = 0;
+  /** walk mode: last frame's eye, so stick and physical head motion both go through the walk collisions */
+  private lastEye: THREE.Vector3 | null = null;
   private bar: HTMLElement | null = null;
   private tipKey = '';
   private wristKey = '';
@@ -196,6 +206,7 @@ export class XRMode {
     // we update the XR cameras ourselves (see cullingFrustum)
     this.renderer.xr.cameraAutoUpdate = false;
     world.rig.onFlight = (pos, target) => this.onFlight(pos, target);
+    world.rig.onPlace = (pos, target) => this.onPlace(pos, target);
     this.renderer.xr.addEventListener('sessionstart', () => this.onStart());
     this.renderer.xr.addEventListener('sessionend', () => this.onEnd());
     void this.mountButtons();
@@ -223,8 +234,8 @@ export class XRMode {
 
   async enter(mode: Mode) {
     if (this.renderer.xr.isPresenting) return;
-    if (this.world.rig.mode === 'walk' || this.world.roomMap) {
-      this.world.ev.caption?.('EXIT WALK MODE FOR XR', 'X to exit the building · G to return to orbit');
+    if (this.world.roomMap) {
+      this.world.ev.caption?.('CLOSE THE BUILDING MAP FOR XR', 'M or Esc to resume walking');
       return;
     }
     const type = mode === 'mr' ? 'immersive-ar' : 'immersive-vr';
@@ -272,9 +283,23 @@ export class XRMode {
     this.renderer.toneMapping = THREE.NoToneMapping;
     this.renderer.toneMappingExposure = 1;
     this.renderer.setClearAlpha(1);
-    // hand the head's viewpoint back to the orbit controls, levelled
+    this.lastEye = null;
+    this.fade = 0;
+    this.comfort.material.uniforms.uBlink.value = 0;
     const cam = engine.camera;
     const fwd = cam.getWorldDirection(new THREE.Vector3());
+    if (world.rig.mode === 'walk') {
+      // still on foot: hand the head's position and heading back to the desktop walk rig, levelled
+      const eye = cam.position.clone().setY(world.rig.walkFloor);
+      const level = fwd.setY(0).lengthSq() > 1e-6 ? fwd.normalize() : new THREE.Vector3(0, 0, -1);
+      cam.up.set(0, 1, 0);
+      cam.fov = 55;
+      world.rig.place(eye, eye.clone().addScaledVector(level, 40));
+      engine.resize();
+      this.bar?.classList.remove('hidden');
+      return;
+    }
+    // hand the head's viewpoint back to the orbit controls, levelled
     engine.controls.target.copy(cam.position).addScaledVector(fwd, 40);
     cam.up.set(0, 1, 0);
     cam.lookAt(engine.controls.target);
@@ -349,6 +374,17 @@ export class XRMode {
     if (Math.abs(turn) > 0.6) this.blink = { t: 0, turn, done: false };
   }
 
+  /** The app teleported the camera (rig.place): the head drives the camera in XR, so move the headset there. */
+  private onPlace(pos: THREE.Vector3, target: THREE.Vector3) {
+    if (!this.renderer.xr.isPresenting || this.scaleMode === 'table') return;
+    this.follow = false;
+    this.vel.set(0, 0, 0);
+    this.lastEye = null;
+    const d = target.clone().sub(pos);
+    this.place(pos.clone(), Math.hypot(d.x, d.z) > 1e-3 ? yawToward(d) : this.headYaw());
+    if (!this.blink) this.fade = 1;
+  }
+
   // ------------------------------------------------------------------ frame
   private before(dt: number) {
     this.frame++;
@@ -365,6 +401,8 @@ export class XRMode {
       this.lastView = this.world.view;
       if (this.scaleMode === 'table') this.placeTable();
     }
+    // walk mode re-enables the orbit controls when it ends; in a headset they stay off
+    if (this.engine.controls.enabled) this.engine.controls.enabled = false;
     this.updateBlink(dt);
     this.locomotion(dt);
     this.rig.updateMatrixWorld(true);
@@ -436,7 +474,14 @@ export class XRMode {
   private updateBlink(dt: number) {
     const b = this.blink;
     const u = this.comfort.material.uniforms.uBlink;
-    if (!b) return;
+    if (!b) {
+      if (this.fade > 0) {
+        u.value = this.fade;
+        this.fade = Math.max(0, this.fade - dt / 0.25);
+      } else u.value = 0;
+      return;
+    }
+    this.fade = 0;
     b.t += dt;
     const OUT = 0.1;
     const IN = 0.18;
@@ -467,6 +512,8 @@ export class XRMode {
   }
 
   private locomotion(dt: number) {
+    if (this.world.rig.mode === 'walk') return this.walkLocomotion(dt);
+    this.lastEye = null;
     const want = new THREE.Vector3();
     const L = this.side('left');
     const R = this.side('right');
@@ -506,6 +553,68 @@ export class XRMode {
     this.engine.touch();
   }
 
+  /**
+   * On foot (the streets, and the corridors and rooms behind the entrances): the left stick walks
+   * along the ground where you look, the feet stay on the walk floor (your real height on top), and
+   * every eye movement, stick or physical, runs through the desktop's walk collisions. Those also
+   * detect the arches and doorways, so walking through an entrance enters the building.
+   */
+  private walkLocomotion(dt: number) {
+    const wr = this.world.rig;
+    if (this.scaleMode !== 'life') this.setScale('life');
+    const busy = this.follow || wr.flying || wr.walkBlocked || this.world.transitioning;
+    const want = new THREE.Vector3();
+    const L = this.side('left');
+    const R = this.side('right');
+    if (!busy && L >= 0) {
+      const gp = this.gamepad(L)!;
+      const s = this.stick(gp);
+      const q = this.rig.quaternion.clone().multiply(this.headLocalQ);
+      const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(q);
+      if (!wr.zeroGravity) fwd.setY(0);
+      if (fwd.lengthSq() < 1e-6) fwd.set(0, 0, -1).applyQuaternion(this.rig.quaternion);
+      fwd.normalize();
+      const right = new THREE.Vector3(1, 0, 0).applyQuaternion(q).setY(0).normalize();
+      const k = (v: number) => Math.sign(v) * Math.min(1, Math.max(0, Math.abs(v) - 0.12) / 0.88);
+      want.addScaledVector(fwd, -k(s.y)).addScaledVector(right, k(s.x));
+      if (want.lengthSq() > 1) want.normalize();
+      want.multiplyScalar(gp.buttons[1]?.pressed ? RUN : WALK);
+    }
+    if (!busy && wr.zeroGravity && R >= 0) {
+      const s = this.stick(this.gamepad(R)!);
+      if (Math.abs(s.y) > 0.25) want.y += -Math.sign(s.y) * (Math.abs(s.y) - 0.25) * 1.3 * WALK;
+    }
+    if (busy) this.vel.set(0, 0, 0);
+    else this.vel.lerp(want, 1 - Math.exp(-dt * 10));
+    this.rig.position.addScaledVector(this.vel, dt);
+    // feet on the floor; a flight (the approach to the street) moves the rig itself
+    if (!this.follow && !wr.zeroGravity) this.rig.position.y = wr.walkFloor - EYE_HEIGHT;
+    this.rig.updateMatrixWorld(true);
+    const eye = this.headWorld();
+    if (this.lastEye && !busy) {
+      const d = eye.clone().sub(this.lastEye);
+      const steps = Math.ceil(d.length() / WALK_STEP);
+      // more than a few metres in a frame is a teleport, not a step
+      if (steps > 0 && steps <= 40) {
+        d.divideScalar(steps);
+        const p = this.lastEye.clone();
+        const from = new THREE.Vector3();
+        for (let i = 0; i < steps && !wr.walkBlocked; i++) {
+          from.copy(p);
+          p.add(d);
+          wr.walkCollision(p, from);
+        }
+        this.rig.position.x += p.x - eye.x;
+        this.rig.position.z += p.z - eye.z;
+        // a corridor ramp or the room just entered changes the floor under the feet
+        if (!this.follow && !wr.zeroGravity) this.rig.position.y = wr.walkFloor - EYE_HEIGHT;
+        this.rig.updateMatrixWorld(true);
+      }
+    }
+    this.lastEye = busy || wr.mode !== 'walk' ? null : this.headWorld();
+    if (this.vel.lengthSq() > 1e-4) this.engine.touch();
+  }
+
   private edge(i: number, b: number) {
     const gp = this.gamepad(i);
     if (!gp) return false;
@@ -519,13 +628,19 @@ export class XRMode {
     const L = this.side('left');
     const R = this.side('right');
     const st = this.app.status();
+    const walking = this.world.rig.mode === 'walk';
+    const inside = walking && this.world.view === 'interior';
     if (R >= 0) {
-      if (this.edge(R, 4)) this.app.key('Enter'); // A: dive into the core
-      if (this.edge(R, 5)) this.app.key('Escape'); // B: back out
-      if (this.edge(R, 3)) this.app.key('h'); // stick click: overview
+      const grip = !!this.gamepad(R)!.buttons[1]?.pressed;
+      // A: dive into the core; on foot, go through the entrance in front / the exit you face.
+      // R grip + A: walk the streets (G), and back to orbit.
+      if (this.edge(R, 4)) this.app.key(grip && this.world.view === 'city' ? 'g' : 'Enter');
+      // B: back out; on the street that ends the walk (G: Escape is ignored while the pointer is locked),
+      // in a building it heads back out to the street
+      if (this.edge(R, 5)) this.app.key(inside ? 'x' : walking ? 'g' : 'Escape');
+      if (this.edge(R, 3) && !walking) this.app.key('h'); // stick click: overview
       const hand = this.hands[R];
       const s = this.stick(this.gamepad(R)!);
-      const grip = !!this.gamepad(R)!.buttons[1]?.pressed;
       if (grip && this.world.view === 'function') {
         // grip + flick: walk the control flow (↓ fall-through, → taken, ↑ predecessor, ← back)
         const m = Math.max(Math.abs(s.x), Math.abs(s.y));
@@ -544,9 +659,10 @@ export class XRMode {
       }
     }
     if (L >= 0) {
-      if (this.edge(L, 4)) this.app.key('c'); // X: constellation
-      if (this.edge(L, 5)) this.cycleScale(); // Y: world scale
-      if (this.edge(L, 3) && st.sel !== null && this.world.view === 'city') this.app.key(String((st.depth % 3) + 1)); // stick click: focus depth
+      // on foot these stay off: the walk is at life size, and the graph views would leave the street
+      if (this.edge(L, 4) && !walking) this.app.key('c'); // X: constellation
+      if (this.edge(L, 5) && !walking) this.cycleScale(); // Y: world scale
+      if (this.edge(L, 3) && !walking && st.sel !== null && this.world.view === 'city') this.app.key(String((st.depth % 3) + 1)); // stick click: focus depth
     }
     // the pointing hand drives hover
     const h = this.hands[this.active];
@@ -652,19 +768,36 @@ export class XRMode {
     const scale = { life: 'LIFE SIZE', giant: `GIANT ×${GIANT}`, table: 'TABLETOP' }[this.scaleMode];
     const f = m && st.sel !== null ? m.fns[st.sel] : null;
     const file = this.world.info?.path?.split('/').pop() ?? '';
+    const w = this.world;
+    const walking = w.rig.mode === 'walk';
+    const inside = walking && w.view === 'interior';
+    const room = inside ? w.room : null;
+    const help = !walking
+      ? [
+          '!trigger  select · 2× dive in',
+          '!A core  B back  X graph  Y scale',
+          '!L stick fly · grip boost',
+          '!R stick turn · rise / sink',
+          w.view === 'function' ? '!R grip + flick  walk the flow' : '!L click depth  R click overview',
+          w.view === 'city' ? '!R grip + A  walk the streets' : '',
+        ]
+      : [
+          '!L stick walk · grip run',
+          room?.zeroGravity ? '!R stick turn · rise / sink' : '!R stick turn',
+          inside ? '!A take the exit you face' : '!walk through a lit arch to enter',
+          inside ? '!B back to the street' : '!A enter the door in front',
+          inside ? '' : '!B or R grip + A  back to orbit',
+        ];
     const lines = [
       `~r3 // ${view}`,
       `${file}`,
-      f ? `#${f.name}` : 'no selection',
-      f ? `size ${f.size} · ${f.nbbs} blocks · ▲${m!.callers(st.sel!).length} ▼${m!.callees(st.sel!).length}` : '',
-      st.seek !== null ? `@${hex(st.seek)}` : '',
-      `~${scale}`,
+      room ? `#${m?.fns[room.plan.fi]?.name ?? ''}` : f ? `#${f.name}` : 'no selection',
+      room ? `floor ${room.floor} · ${room.block === room.plan.entry ? 'entry block' : 'basic block'}`
+        : f ? `size ${f.size} · ${f.nbbs} blocks · ▲${m!.callers(st.sel!).length} ▼${m!.callees(st.sel!).length}` : '',
+      room ? `@${hex(room.block.addr)}` : st.seek !== null ? `@${hex(st.seek)}` : '',
+      walking ? '~ON FOOT' : `~${scale}`,
       '',
-      '!trigger  select · 2× dive in',
-      '!A core  B back  X graph  Y scale',
-      '!L stick fly · grip boost',
-      '!R stick turn · rise / sink',
-      this.world.view === 'function' ? '!R grip + flick  walk the flow' : '!L click depth  R click overview',
+      ...help,
     ];
     const k = lines.join('\n');
     if (k === this.wristKey) return;

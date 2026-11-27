@@ -461,7 +461,7 @@ class App {
 
   private toggleWalking() {
     const w = this.world;
-    if (this.busy || w.engine.presenting || w.view !== 'city') return;
+    if (this.busy || w.view !== 'city') return;
     if (w.rig.mode === 'walk') {
       w.stopWalking(true);
       this.walkHint(null);

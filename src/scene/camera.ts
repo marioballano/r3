@@ -50,6 +50,8 @@ export class CameraRig {
   onMode: (m: CamMode) => void = () => {};
   /** a flight is starting (the WebXR layer re-aims the headset towards `target`) */
   onFlight: (pos: THREE.Vector3, target: THREE.Vector3) => void = () => {};
+  /** the camera was teleported (the WebXR layer moves the headset there, since the head drives the camera) */
+  onPlace: (pos: THREE.Vector3, target: THREE.Vector3) => void = () => {};
   private tween: gsap.core.Tween | null = null;
   private inFlight = false;
   private flight: object | null = null;
@@ -218,6 +220,7 @@ export class CameraRig {
     this.yaw = Math.atan2(-dir.x, -dir.z);
     this.pitch = Math.asin(THREE.MathUtils.clamp(dir.y, -1, 1));
     if (this.mode === 'orbit') this.engine.controls.target.copy(target);
+    this.onPlace(pos, target);
   }
 
   lock() {
