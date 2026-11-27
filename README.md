@@ -182,7 +182,7 @@ WebXR needs a secure context, so the headset has to open r3 either on `localhost
 - **USB (recommended).** Enable developer mode on the headset, plug it in and run `adb reverse tcp:5173 tcp:5173`
   on the machine it's plugged into. Then open `http://localhost:5173` in the headset browser. Nothing is exposed
   to the network.
-- **Wi-Fi.** `R3_LAN=1 npm run dev` serves Vite on every interface over HTTPS with a self-signed certificate. Open
+- **Wi-Fi.** `npm run dev:vr` (same as `R3_LAN=1 npm run dev`) serves Vite on every interface over HTTPS with a self-signed certificate. Open
   the `Network` URL that Vite prints and accept the certificate warning. **This exposes the API, which browses
   the host filesystem, to everyone on the network.**
 

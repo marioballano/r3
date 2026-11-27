@@ -6,7 +6,8 @@
   "description": "r3 — navigate binaries in 3D. A cyberpunk, artistic front end for radare2.",
   "scripts": {
     "dev": "concurrently -k -n srv,web -c magenta,cyan \"tsx watch server/index.ts\" \"vite\"",
-    "server": "tsx server/index.ts",
+    "dev:vr": "R3_LAN=1 npm run dev",
+    "server":"tsx server/index.ts",
     "build": "tsc -b && vite build",
     "start": "NODE_ENV=production tsx server/index.ts",
     "typecheck": "tsc -b",
