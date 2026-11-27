@@ -115,6 +115,7 @@ export interface Op {
   opcode?: string;
   type?: string;
   bytes?: string;
+  esil?: string;
   jump?: number;
   fail?: number;
   flags?: string[];
@@ -152,7 +153,7 @@ export interface Block {
   size: number;
   jump?: number;
   fail?: number;
-  switchop?: { cases?: { jump: number }[] };
+  switchop?: { cases?: { jump: number; value?: number }[] };
   ops: Op[];
 }
 

@@ -19,6 +19,8 @@ export interface R2Client {
   inspect(addr: number): Promise<InspectMsg | null>;
   pdc(addr: number): Promise<string>;
   fn(addr: number): Promise<FnGraph | null>;
+  blockSummary(addr: number): Promise<string>;
+  functionSummary(addr: number): Promise<string>;
   close(): void;
 }
 export interface CommandTransport {

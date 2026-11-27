@@ -19,6 +19,7 @@ export function createGround(engine: Engine) {
       uPulse: { value: 0 },
     },
     vertexShader: /* glsl */ `
+      #include <clipping_planes_pars_vertex>
       uniform mat4 textureMatrix;
       varying vec4 vUvR;
       varying vec3 vWorld;
@@ -26,9 +27,12 @@ export function createGround(engine: Engine) {
         vUvR = textureMatrix * vec4(position, 1.0);
         vec4 w = modelMatrix * vec4(position, 1.0);
         vWorld = w.xyz;
-        gl_Position = projectionMatrix * viewMatrix * w;
+        vec4 mvPosition = viewMatrix * w;
+        gl_Position = projectionMatrix * mvPosition;
+        #include <clipping_planes_vertex>
       }`,
     fragmentShader: /* glsl */ `
+      #include <clipping_planes_pars_fragment>
       ${NOISE}
       ${FOG_PARS}
       uniform sampler2D tDiffuse;
@@ -47,6 +51,7 @@ export function createGround(engine: Engine) {
       }
 
       void main() {
+        #include <clipping_planes_fragment>
         vec2 p = vWorld.xz;
         float dist = length(cameraPosition - vWorld);
         float r = length(p);
@@ -102,18 +107,19 @@ export function createGround(engine: Engine) {
   ground.rotation.x = -Math.PI / 2;
   ground.position.y = -0.02;
   ground.material.extensions = { ...(ground.material.extensions ?? {}), derivatives: true } as any;
+  ground.material.clipping = true;
 
   const origBefore = ground.onBeforeRender;
   ground.onBeforeRender = function (this: Reflector, ...args: Parameters<typeof origBefore>) {
     // in a headset the reflection would re-render the whole city once per eye: skip it
-    if (engine.quality >= 1 && !engine.presenting) origBefore.apply(this, args);
+    if (engine.quality >= 1 && !engine.presenting && !ground.material.clippingPlanes) origBefore.apply(this, args);
   } as typeof origBefore;
 
   const u = ground.material.uniforms;
   let pulseT = -1;
   engine.add((dt, t) => {
     u.uTime.value = t;
-    u.uReflect.value = engine.quality >= 1 && !engine.presenting ? 1 : 0;
+    u.uReflect.value = engine.quality >= 1 && !engine.presenting && !ground.material.clippingPlanes ? 1 : 0;
     if (pulseT >= 0) {
       pulseT += dt / 2.2;
       u.uPulse.value = Math.min(pulseT, 1);

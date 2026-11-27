@@ -1,6 +1,34 @@
 import * as THREE from 'three';
 import { FOG_PARS, globals } from '../shaders/common';
 
+/** Rasterize a panel or sign that is attached to 3D geometry. */
+export function textTexture(lines: { text: string; color: string }[], bg: string, fontSize = 28, border?: string) {
+  const canvas = document.createElement('canvas');
+  const ctx = canvas.getContext('2d')!;
+  const font = `500 ${fontSize}px "JetBrains Mono", monospace`;
+  const row = Math.ceil(fontSize * 1.4);
+  ctx.font = font;
+  canvas.width = Math.ceil(Math.max(1, ...lines.map(({ text }) => ctx.measureText(text).width))) + 36;
+  canvas.height = row * lines.length + 26;
+  ctx.fillStyle = bg;
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  if (border) {
+    ctx.fillStyle = border;
+    ctx.fillRect(0, 0, 4, canvas.height);
+    ctx.fillRect(0, canvas.height - 2, canvas.width, 2);
+  }
+  ctx.font = font;
+  ctx.textBaseline = 'middle';
+  lines.forEach(({ text, color }, i) => {
+    ctx.fillStyle = color;
+    ctx.fillText(text, 18, 13 + row * (i + 0.5));
+  });
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.anisotropy = 8;
+  return tex;
+}
+
 export interface LabelSpec {
   text: string;
   color: THREE.Color;

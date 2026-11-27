@@ -80,6 +80,14 @@ export class R2Socket implements R2Client {
     return m.graph;
   }
 
+  async blockSummary(addr: number): Promise<string> {
+    return (await this.req<{ text: string }>({ t: 'block-summary', addr })).text;
+  }
+
+  async functionSummary(addr: number): Promise<string> {
+    return (await this.req<{ text: string }>({ t: 'function-summary', addr })).text;
+  }
+
   private failPending(error: Error) {
     for (const request of this.waiting.values()) { clearTimeout(request.timer); request.reject(error); }
     this.waiting.clear();

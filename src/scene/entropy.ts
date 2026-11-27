@@ -3,6 +3,8 @@ import { FOG_PARS, globals, heat, PALETTE } from '../shaders/common';
 import type { EntropyData, Section } from '../types';
 import { LabelField } from './labels';
 
+export const HALO_GAP = 18;
+
 export function sectionColor(s: Section | undefined, out = new THREE.Color()): THREE.Color {
   if (!s) return out.set(0x5a4a7a);
   const p = s.perm ?? '';
@@ -31,7 +33,7 @@ export class EntropyHalo {
   constructor(data: EntropyData | null, sections: Section[], cityRadius: number) {
     this.data = data;
     this.sections = sections.filter((s) => s.size > 0 && s.name);
-    this.radius = cityRadius + 55;
+    this.radius = cityRadius + HALO_GAP;
     const vals = data?.entropy?.length ? data.entropy : Array.from({ length: 64 }, (_, i) => ({ addr: i, value: 0 }));
     const N = vals.length;
     const R = this.radius;

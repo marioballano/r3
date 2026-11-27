@@ -194,6 +194,33 @@ html, body { margin: 0; height: 100%; overflow: hidden; background: var(--ink); 
 /* =================================================================== navigation chrome */
 .hud .mode { font-family: var(--mono); font-size: 10px; letter-spacing: 0.18em; color: #8f7fc4; margin-top: 6px; }
 .hud .mode.drone { color: var(--yel); text-shadow: 0 0 8px var(--yel); }
+.hud .mode.on-foot { color: #a1f4ff; }
+#gl, #ui { user-select: none; -webkit-user-select: none; }
+#ui input, #ui textarea, #ui [contenteditable="true"] { user-select: text; -webkit-user-select: text; }
+#gl.walk-pointer { cursor: none; }
+.hud .walk-status {
+  position: absolute; bottom: 64px; left: 50%; transform: translateX(-50%);
+  max-width: min(700px, 82vw); width: max-content; padding: 8px 13px; text-align: center;
+  background: rgba(9, 12, 27, 0.88); border: 1px solid rgba(117, 228, 255, 0.32);
+  font: 11px/1.5 var(--mono); color: #b9c8e5;
+}
+.hud .walk-status strong { display: block; color: #ebfaff; font-size: 12px; overflow-wrap: anywhere; }
+.hud .walk-status span { display: block; }
+.room-map-sidebar {
+  position: absolute; top: 142px; left: 18px; width: clamp(133px, 18vw, 250px);
+  background: rgba(7, 13, 29, 0.90); font: 10px/1.3 var(--mono);
+}
+.room-map-sidebar canvas { display: block; width: 100%; height: auto; }
+.room-map-top { display: flex; justify-content: space-between; align-items: center; gap: 5px; padding: 7px; color: #ffe375; }
+.room-map-top strong { font-size: inherit; }
+.room-map-top button {
+  pointer-events: auto; background: #101e36; border: 1px solid #3c6884; padding: 3px 4px;
+  color: #bbf2fa; font: inherit; cursor: pointer; white-space: nowrap;
+}
+.room-map-location { padding: 6px 7px; color: #c1d9ec; border-top: 1px solid #23445f; }
+.room-map-cases { color: #ffe375; padding: 5px 7px; border-top: 1px solid #574529; }
+body.room-map-open .inspector { visibility: hidden; }
+body.room-map-open.ins-open .hud .tr { right: 22px; }
 .hud .depth { font-family: var(--disp); font-size: 9px; letter-spacing: 0.3em; color: #8f7fc4; margin-top: 6px; }
 .hud .depth span { display: inline-block; width: 16px; text-align: center; margin-left: 3px; border: 1px solid rgba(255, 43, 214, 0.4); color: #8f7fc4; }
 .hud .depth span.on { background: var(--mag); color: #000; box-shadow: 0 0 10px var(--mag); }

@@ -98,6 +98,17 @@ shortcuts, updating WASM, and integration checks.
 - `J`/`K` step one instruction at a time.
 - Double-click a `call` to follow it into the callee.
 
+**Buildings (`G` from the city).** The camera descends to the selected tower or the binary's entry point and the streets open up for walking. Move the mouse to look. Every street entrance has a function nameplate. Look through the open doorway into the entry room, and look up to see `pdsf` strings written across nearby building facades.
+
+- Each room is a basic block. Green doors take the true branch, red doors take the false branch, and a blue door follows a single successor. Floor numbers count the fewest edges from the entry block. Doors for jumps to lower addresses use sliding elevators. Switch cases show their decimal value and any printable ASCII character. In spherical rooms they use circular openings.
+- Solid room and corridor walls leave the sightline open through doorways. Street and return doors have rounded arches, and the entry arch looks out onto the live street. Before entering a branch corridor, you can see its floor, walls and rails beside a glowing `pdsb` excerpt from the destination block.
+- The camera follows corridor bends while you walk. Long corridors pick up speed after the doorway. Floor arrows point from source to destination in either direction of travel, and jumping is disabled inside. Use `S` to back up, or turn around with the mouse and keep walking forward.
+- Walk through doors and passages under your own control. Blocks with more than two exits are zero-gravity spheres with a grid of doors. Look toward a door and move forward, or use `Space` and `Q` to rise and descend.
+- The central orb turns green or red when the available ESIL establishes the branch outcome and amber when it remains unknown. Read the full block disassembly on the left wall.
+- The block's `pdsb` summary floats overhead. Calls glow pink. `Tab` cycles through the calls and then clears the selection. Aim at a call or select it with `Tab`, then press `Space` to teleport to its function or import relay. With no call target, press `Space` to jump.
+- The sidebar uses the full graph's layout and marks your current room. Press `M` from a room or corridor to open the full-screen map. Select a block and press `M` or `Enter` to visit it, or press `Esc` to resume from where you opened the map.
+- The **BACK** arch retraces your route and brings you in through the doorway you used before. `Backspace` returns quickly, including across jumps between functions.
+
 **Inspector (`I`).** A docked panel that stays in sync with the 3D view:
 
 - **Disasm:** virtualised, with jump-arrow lanes, xref annotations, string and comment hints, and clickable operands (functions, jump targets, symbols resolved by r2 itself).
@@ -126,6 +137,12 @@ Hovering a line highlights the same instruction in the CFG, or its call arc in t
 | `↓ → ↑ ←`, `J` `K` | core: walk the control flow / step instructions |
 | `Ctrl K`, `/` | search everything |
 | `F` | drone flight |
+| `G` | walk the city or return to orbit |
+| `WASD` or `↑ ↓`, `Shift` + `WASD` or arrows, `Space` | walk, sprint, jump |
+| `← →` then `E` | choose and take a room exit without walking to it |
+| `Tab` / `Shift Tab`, `Space` | cycle calls, clear selection, and follow the selected function |
+| `M`, `Backspace`, `X` | open or close the building map, go back a room, exit to the street |
+| `[` / `]` | page through a long block summary |
 | `I` | Inspector |
 | `~` or `` ` `` | holographic r2 shell |
 | `Alt ←` / `Alt →`, `Backspace` | back / forward |

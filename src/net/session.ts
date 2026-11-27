@@ -72,6 +72,12 @@ export class CommandSession implements R2Client {
   fn(addr: number): Promise<FnGraph | null> {
     return this.transaction(async () => (await this.json<FnGraph[]>(`agfj @ ${Number(addr)}`))?.[0] ?? null);
   }
+  blockSummary(addr: number): Promise<string> {
+    return this.transaction(async () => clipped(await this.transport.cmd(`pdsb @ ${Number(addr)} @e:scr.color=0`)));
+  }
+  functionSummary(addr: number): Promise<string> {
+    return this.transaction(async () => clipped(await this.transport.cmd(`pdsf @ ${Number(addr)} @e:scr.color=0`)));
+  }
   inspect(addr: number): Promise<InspectMsg> {
     return this.transaction(async () => {
       const a = Number(addr);

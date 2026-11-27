@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { FOG_PARS, globals, PALETTE } from '../shaders/common';
 import { hex, type Block, type FnGraph, type Op } from '../types';
+import { graphEdges, type Edge, type EdgeKind } from '../flow';
 import { LabelField } from './labels';
 import { Ribbons, type RibbonSpec } from './ribbons';
 import type { LayoutReq, LayoutRes } from './cfg.worker';
@@ -15,7 +16,6 @@ const MAX_LINES = 40;
 const MAX_DETAIL = 90; // crisp text textures alive at once
 const CHAR_W = FONT_PX * 0.6; // JetBrains Mono advance
 
-export type EdgeKind = 'jump' | 'fail' | 'uncond' | 'case';
 export const EDGE_COLORS: Record<EdgeKind, THREE.Color> = {
   jump: new THREE.Color(0x39ff88),
   fail: new THREE.Color(0xff3864),
@@ -57,10 +57,80 @@ export interface Panel {
   index: number;
 }
 
-export interface Edge {
-  from: number;
-  to: number;
-  kind: EdgeKind;
+function blockLines(b: Block, g: FnGraph): Line[] {
+  const ops = b.ops ?? [];
+  const lines: Line[] = [];
+  for (const op of ops.slice(0, MAX_LINES)) {
+    for (const f of op.flags ?? []) if (f !== 'pc' && f !== g.name) lines.push({ segs: [[`;-- ${f}:`, '#fff36b']] });
+    const dis = (op.disasm ?? op.opcode ?? '???').trim();
+    const sp = dis.indexOf(' ');
+    const mnem = sp > 0 ? dis.slice(0, sp) : dis;
+    const args = sp > 0 ? dis.slice(sp) : '';
+    lines.push({
+      op,
+      segs: [
+        [hex(op.addr), '#7d6aa8'],
+        ['  ', '#000'],
+        [mnem.padEnd(7), opColor(op.type)],
+        [args.length > 46 ? args.slice(0, 45) + '…' : args, '#d8f6ff'],
+      ],
+    });
+  }
+  if (ops.length > MAX_LINES) lines.push({ segs: [[`  … ${ops.length - MAX_LINES} more instructions`, '#8a7ab0']] });
+  return lines;
+}
+
+interface DiagramPanel {
+  block: Block;
+  lines: Line[];
+  w: number;
+  h: number;
+  pxW: number;
+  pxH: number;
+}
+
+export interface FunctionDiagram {
+  panels: DiagramPanel[];
+  edges: Edge[];
+  layout: Promise<LayoutRes>;
+}
+
+const diagrams = new WeakMap<FnGraph, FunctionDiagram>();
+
+/** Use the same measured nodes and Dagre routes for the full graph and its minimap. */
+export function functionDiagram(graph: FnGraph): FunctionDiagram {
+  const existing = diagrams.get(graph);
+  if (existing) return existing;
+  const panels = (graph.blocks ?? []).map((block) => {
+    const lines = blockLines(block, graph);
+    const maxChars = Math.max(30, ...lines.map((line) => line.segs.reduce((size, segment) => size + segment[0].length, 0)));
+    const pxW = Math.ceil(maxChars * CHAR_W + PAD_X * 2);
+    const pxH = HEADER_H + lines.length * LINE_H + 14;
+    return { block, lines, w: pxW / PX_PER_UNIT, h: pxH / PX_PER_UNIT, pxW, pxH };
+  });
+  const edges = graphEdges(graph);
+  const req: LayoutReq = {
+    nodes: panels.map((p) => ({ id: String(p.block.addr), w: p.w, h: p.h })),
+    edges: edges.map((e, i) => ({ v: String(e.from), w: String(e.to), name: `e${i}`, weight: e.kind === 'fail' ? 3 : e.kind === 'uncond' ? 2 : 1 })),
+  };
+  const layout = new Promise<LayoutRes>((resolve, reject) => {
+    const worker = new CFGWorker();
+    worker.onmessage = (ev) => {
+      resolve(ev.data);
+      worker.terminate();
+    };
+    worker.onerror = (err) => {
+      reject(err);
+      worker.terminate();
+    };
+    worker.postMessage(req);
+  }).catch((error) => {
+    diagrams.delete(graph);
+    throw error;
+  });
+  const diagram = { panels, edges, layout };
+  diagrams.set(graph, diagram);
+  return diagram;
 }
 
 /** A function's control-flow graph: dagre-laid-out glass panels with LOD text. */
@@ -68,11 +138,13 @@ export class FuncView {
   group = new THREE.Group();
   graph: FnGraph;
   panels: Panel[] = [];
-  edges: Edge[] = [];
+  readonly diagram: FunctionDiagram;
+  edges: Edge[];
   private byAddr = new Map<number, Panel>();
   private edgeRibbons: Ribbons | null = null;
   private arrows: THREE.InstancedMesh | null = null;
   private title: LabelField | null = null;
+  private location: LabelField | null = null;
   private backdrop: THREE.Mesh | null = null;
   private barTex: THREE.DataTexture;
   bounds = new THREE.Box3();
@@ -85,28 +157,17 @@ export class FuncView {
 
   constructor(graph: FnGraph) {
     this.graph = graph;
-    const blocks = graph.blocks ?? [];
-    const has = new Set(blocks.map((b) => b.addr));
-    for (const b of blocks) {
-      const cond = b.fail !== undefined && b.jump !== undefined;
-      if (b.jump !== undefined && has.has(b.jump)) this.edges.push({ from: b.addr, to: b.jump, kind: cond ? 'jump' : 'uncond' });
-      if (b.fail !== undefined && has.has(b.fail)) this.edges.push({ from: b.addr, to: b.fail, kind: 'fail' });
-      for (const c of b.switchop?.cases ?? []) if (has.has(c.jump)) this.edges.push({ from: b.addr, to: c.jump, kind: 'case' });
-    }
+    this.diagram = functionDiagram(graph);
+    this.edges = this.diagram.edges;
 
-    // text lines + sizes (no rasterisation yet)
     let totalRows = 0;
-    blocks.forEach((b, i) => {
-      const lines = this.linesOf(b, graph);
-      const maxChars = Math.max(30, ...lines.map((l) => l.segs.reduce((s, x) => s + x[0].length, 0)));
-      const pxW = Math.ceil(maxChars * CHAR_W + PAD_X * 2);
-      const pxH = HEADER_H + lines.length * LINE_H + 14;
+    this.diagram.panels.forEach((panel, index) => {
       const rows: Panel['rows'] = [];
-      lines.forEach((l, k) => l.op && rows.push({ addr: l.op.addr, y0: HEADER_H + k * LINE_H + 4, y1: HEADER_H + (k + 1) * LINE_H + 4 }));
-      const p: Panel = { block: b, mesh: null!, mat: null!, w: pxW / PX_PER_UNIT, h: pxH / PX_PER_UNIT, pxW, pxH, lines, rows, detail: null, lastUsed: 0, index: i };
-      totalRows += lines.length;
+      panel.lines.forEach((line, k) => line.op && rows.push({ addr: line.op.addr, y0: HEADER_H + k * LINE_H + 4, y1: HEADER_H + (k + 1) * LINE_H + 4 }));
+      const p: Panel = { ...panel, mesh: null!, mat: null!, rows, detail: null, lastUsed: 0, index };
+      totalRows += panel.lines.length;
       this.panels.push(p);
-      this.byAddr.set(b.addr, p);
+      this.byAddr.set(panel.block.addr, p);
     });
 
     // shared "barcode" texture: one texel per line (colour + line length) for far LOD
@@ -222,46 +283,8 @@ export class FuncView {
     this.ready = this.layout();
   }
 
-  private linesOf(b: Block, g: FnGraph): Line[] {
-    const ops = b.ops ?? [];
-    const lines: Line[] = [];
-    for (const op of ops.slice(0, MAX_LINES)) {
-      for (const f of op.flags ?? []) if (f !== 'pc' && f !== g.name) lines.push({ segs: [[`;-- ${f}:`, '#fff36b']] });
-      const dis = (op.disasm ?? op.opcode ?? '???').trim();
-      const sp = dis.indexOf(' ');
-      const mnem = sp > 0 ? dis.slice(0, sp) : dis;
-      const args = sp > 0 ? dis.slice(sp) : '';
-      lines.push({
-        op,
-        segs: [
-          [hex(op.addr), '#7d6aa8'],
-          ['  ', '#000'],
-          [mnem.padEnd(7), opColor(op.type)],
-          [args.length > 46 ? args.slice(0, 45) + '…' : args, '#d8f6ff'],
-        ],
-      });
-    }
-    if (ops.length > MAX_LINES) lines.push({ segs: [[`  … ${ops.length - MAX_LINES} more instructions`, '#8a7ab0']] });
-    return lines;
-  }
-
   private async layout() {
-    const req: LayoutReq = {
-      nodes: this.panels.map((p) => ({ id: String(p.block.addr), w: p.w, h: p.h })),
-      edges: this.edges.map((e, i) => ({ v: String(e.from), w: String(e.to), name: `e${i}`, weight: e.kind === 'fail' ? 3 : e.kind === 'uncond' ? 2 : 1 })),
-    };
-    const res = await new Promise<LayoutRes>((resolve, reject) => {
-      const w = new CFGWorker();
-      w.onmessage = (ev) => {
-        resolve(ev.data);
-        w.terminate();
-      };
-      w.onerror = (e) => {
-        reject(e);
-        w.terminate();
-      };
-      w.postMessage(req);
-    });
+    const res = await this.diagram.layout;
     this.layoutMs = res.ms;
     // dagre: y grows downward → flip; centre the graph horizontally around x=0
     const ox = res.width / 2;
@@ -350,7 +373,12 @@ export class FuncView {
   }
 
   /** Animate panels & edges in (call after `ready`). */
-  reveal(add: (fn: (dt: number) => void) => () => boolean) {
+  reveal(add?: (fn: (dt: number) => void) => () => boolean) {
+    const finish = () => {
+      if (this.edgeRibbons) this.edgeRibbons.material.uniforms.uReveal.value = 1e9;
+      for (const p of this.panels) p.mat.uniforms.uReveal.value = 1;
+    };
+    if (!add) return finish();
     let t = 0;
     const top = this.bounds.max.y;
     const span = Math.max(1, top - this.bounds.min.y);
@@ -362,8 +390,7 @@ export class FuncView {
       }
       if (this.edgeRibbons) this.edgeRibbons.material.uniforms.uReveal.value = Math.max(0, (t - 0.4) * 60);
       if (t > 3.8) {
-        if (this.edgeRibbons) this.edgeRibbons.material.uniforms.uReveal.value = 1e9;
-        for (const p of this.panels) p.mat.uniforms.uReveal.value = 1;
+        finish();
         off();
       }
     });
@@ -458,6 +485,8 @@ export class FuncView {
     return this.edges.filter((e) => e.from === addr);
   }
 
+  get selectedBlock() { return this.seekPanel?.block; }
+
   preds(addr: number): Edge[] {
     return this.edges.filter((e) => e.to === addr);
   }
@@ -516,12 +545,35 @@ export class FuncView {
     return { pos: target.clone().add(new THREE.Vector3(span * 0.1, -span * 0.04, dist)), target };
   }
 
-  overview(aspect = window.innerWidth / window.innerHeight, fov = 55): { pos: THREE.Vector3; target: THREE.Vector3 } {
+  setLocation(addr: number) {
+    this.clearLocation();
+    const p = this.panelAt(addr);
+    if (!p) return;
+    this.location = new LabelField([{
+      text: '▼ YOU ARE HERE', color: new THREE.Color(0xffe375), size: Math.max(1.25, this.bounds.getSize(new THREE.Vector3()).length() * 0.026),
+      position: p.mesh.position.clone().add(new THREE.Vector3(0, p.h / 2 + 2, 5)),
+    }], { atlas: 512, depthTest: false, fadeFar: 18000 });
+    this.location.mesh.renderOrder = 30;
+    this.group.add(this.location.mesh);
+  }
+
+  clearLocation() {
+    if (!this.location) return;
+    this.group.remove(this.location.mesh);
+    this.location.dispose();
+    this.location = null;
+  }
+
+  overview(aspect = window.innerWidth / window.innerHeight, fov = 55, full = false): { pos: THREE.Vector3; target: THREE.Vector3 } {
     const c = new THREE.Vector3();
     const s = new THREE.Vector3();
     this.bounds.getCenter(c);
     this.bounds.getSize(s);
     const t = Math.tan(THREE.MathUtils.degToRad(fov / 2));
+    if (full) {
+      const dist = Math.max(40, (s.y + 26) / (2 * t), (s.x + 26) / (2 * t * aspect));
+      return { pos: c.clone().add(new THREE.Vector3(0, 0, dist)), target: c };
+    }
     // big graphs: frame the top part (entry) rather than a postage stamp of the whole thing
     const fitH = Math.min(s.y + 20, Math.max(80, (s.x + 20) / aspect) * 1.4);
     const dist = Math.max(40, Math.max(fitH / 2 / t, (s.x + 20) / 2 / (t * aspect)) * 0.92);
@@ -530,6 +582,7 @@ export class FuncView {
   }
 
   dispose() {
+    this.location?.dispose();
     for (const p of this.panels) {
       p.detail?.dispose();
       p.mesh.geometry.dispose();

@@ -223,6 +223,10 @@ export class XRMode {
 
   async enter(mode: Mode) {
     if (this.renderer.xr.isPresenting) return;
+    if (this.world.rig.mode === 'walk' || this.world.roomMap) {
+      this.world.ev.caption?.('EXIT WALK MODE FOR XR', 'X to exit the building · G to return to orbit');
+      return;
+    }
     const type = mode === 'mr' ? 'immersive-ar' : 'immersive-vr';
     try {
       const session = await navigator.xr!.requestSession(type, { optionalFeatures: ['local-floor', 'bounded-floor', 'hand-tracking'] });
@@ -644,7 +648,7 @@ export class XRMode {
   private updateWrist() {
     const st = this.app.status();
     const m = this.world.model;
-    const view = { city: 'CITY', constellation: 'CONSTELLATION', function: 'CORE' }[this.world.view];
+    const view = { city: 'CITY', constellation: 'CONSTELLATION', function: 'CORE', interior: 'BUILDING' }[this.world.view];
     const scale = { life: 'LIFE SIZE', giant: `GIANT ×${GIANT}`, table: 'TABLETOP' }[this.scaleMode];
     const f = m && st.sel !== null ? m.fns[st.sel] : null;
     const file = this.world.info?.path?.split('/').pop() ?? '';

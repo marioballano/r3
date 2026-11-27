@@ -93,10 +93,10 @@ export class Inspector {
     this.render();
   }
 
-  async show(fi: number, seek?: number) {
+  async show(fi: number, seek?: number, reveal = true) {
     const m = this.model();
     if (!m) return;
-    if (!this.isOpen && !this.userClosed) this.toggle(true, false);
+    if (reveal && !this.isOpen && !this.userClosed) this.toggle(true, false);
     const changed = fi !== this.fi;
     this.fi = fi;
     if (seek !== undefined) this.seek = seek;

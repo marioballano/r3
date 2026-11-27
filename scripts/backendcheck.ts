@@ -34,11 +34,23 @@ try {
   const [command, query] = await Promise.all([session.cmd(`s ${fn.addr}`), session.query<string>('ej scr.color')]);
   assert.equal(command.seek, fn.addr);
   assert.ok(query !== null);
+  const caller = graph.functions[graph.calls[0][0]];
+  const site = graph.calls[0][2];
+  const callerGraph = await session.fn(caller.addr);
+  const block = callerGraph?.blocks.find(b => b.addr <= site && site < b.addr + b.size);
+  assert.ok(block);
+  const summary = await session.blockSummary(block.addr);
+  assert.ok(summary.includes('0x' + site.toString(16)), 'pdsb contains the call site in the requested block');
+  assert.ok(!summary.includes('\x1b'), 'block summaries have no terminal colors');
+  const functionSummary = await session.functionSummary(caller.addr);
+  assert.ok(functionSummary.includes('0x' + site.toString(16)), 'pdsf contains the call from the requested function');
+  assert.ok(!functionSummary.includes('\x1b'), 'function summaries have no terminal colors');
+  assert.equal((await session.cmd('s')).seek, fn.addr, 'a block summary leaves the seek unchanged');
   assert.equal((await session.cmd('!id')).err, true);
   const other = await WasmCore.create(wasm, new Uint8Array([0x90, 0xc3]));
   try { assert.equal(other.cmd('p8 2').trim(), '90c3'); }
   finally { other.close(); }
   assert.equal((await session.cmd('s')).seek, fn.addr, 'a second core must not affect the first');
-  console.log(`PASS: WASM headers, ${graph.functions.length} functions, ${graph.calls.length} calls, CFG, inspect, pdc, seek, command serialization, isolated cores`);
+  console.log(`PASS: WASM headers, ${graph.functions.length} functions, ${graph.calls.length} calls, CFG, inspect, pdc, pdsb, pdsf, seek, command serialization, isolated cores`);
 } finally { session.close(); }
 await assert.rejects(session.query('ij'), /closed/);

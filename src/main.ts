@@ -9,13 +9,17 @@ import '@fontsource/rajdhani/600.css';
 import './ui/styles.css';
 
 import * as THREE from 'three';
-import { World, type Pick } from './scene/world';
+import { World, type Pick, type RoomMotion } from './scene/world';
+import type { Tower } from './scene/city';
+import { BlockRoom, InteriorPlan, type RoomArrival, type RoomExit } from './scene/interior';
+import { functionStrings } from './scene/entryvista';
 import { Hud } from './ui/hud';
 import { Shell } from './ui/terminal';
 import { showPicker } from './ui/picker';
 import { Inspector } from './ui/inspector';
 import { Palette, type PaletteItem } from './ui/palette';
 import { Minimap } from './ui/minimap';
+import { RoomMapSidebar } from './ui/roommap';
 import { corners, esc, h } from './ui/dom';
 import { R2Socket, r2Status } from './net/socket';
 import type { R2Client } from './net/client';
@@ -56,6 +60,10 @@ const KEYS_HELP: [string, string][] = [
   ['↓ →  ↑ ←', 'core: follow fall-through / taken branch · predecessor / step back'],
   ['J K', 'core: next / previous instruction'],
   ['F', 'toggle drone flight (WASD, Q/E, Shift boost, wheel speed, RMB or lock to look)'],
+  ['G', 'walk the city from the selected tower · WASD · Shift sprint · Space jump'],
+  ['E / ← →', 'walk through, or choose an exit and press E to travel'],
+  ['Tab / Space', 'cycle glowing calls / teleport to the selected or aimed call, or jump'],
+  ['M / Backspace / X', 'building map / previous room / exit to street'],
   ['I', 'toggle the Inspector (disasm · pseudo-C · xrefs · info)'],
   ['Alt ← / Alt →', 'back / forward through your navigation history'],
   ['Esc', 'back out (core/constellation → city, clear focus)'],
@@ -70,6 +78,7 @@ class App {
   inspector!: Inspector;
   palette!: Palette;
   minimap!: Minimap;
+  roomMapSidebar!: RoomMapSidebar;
   nav = new NavHistory();
   sock: R2Client | null = null;
   info: InfoMsg | null = null;
@@ -84,6 +93,11 @@ class App {
   private helpEl: HTMLElement | null = null;
   private version = '';
   private home?: string;
+  private plans = new Map<number, InteriorPlan>();
+  private pendingRoomPlans = new Map<number, Promise<InteriorPlan | null>>();
+  private roomSummaries = new Map<number, Promise<string>>();
+  private entranceStrings = new Map<number, Promise<string[]>>();
+  private roomTrail: ({ fi: number; addr: number } & RoomArrival)[] = [];
 
   constructor() {
     this.world = new World(document.getElementById('gl') as HTMLCanvasElement);
@@ -186,19 +200,30 @@ class App {
         hoverAddr: (a) => this.hoverAddr(a),
       },
     );
-    this.inspector.onToggle = (open) => this.world.engine.setCenterShift(open && window.innerWidth > 900 ? 250 : 0);
+    this.inspector.onToggle = () => this.updateCameraCenter();
     this.palette = new Palette(this.ui);
     this.palette.source = (q) => this.paletteItems(q);
     this.minimap = new Minimap(this.ui, this.world);
+    this.roomMapSidebar = new RoomMapSidebar(this.ui, () => {
+      if (!this.busy || this.world.inCorridor) void this.toggleRoomMap();
+    });
     this.minimap.onTravel = (x, z) => this.travel(x, z);
     this.world.ev = {
       hover: (p, s) => this.onHover(p, s),
       click: (p) => this.onClick(p),
       dbl: (p) => this.onDbl(p),
       caption: (a, b) => this.hud.caption(a, b),
+      enterTower: (tower) => this.enterTower(tower),
+      previewTower: (tower) => this.previewTower(tower),
+      previewStrings: (tower) => this.previewStrings(tower),
+      roomExit: (exit) => this.takeRoomExit(exit),
+      walkHint: (tower, exit) => {
+        if (!this.busy || this.world.inCorridor) this.walkHint(tower, exit);
+      },
     };
     this.world.rig.onMode = (m) => {
       this.hud.setMode(m);
+      this.updateCameraCenter();
       audio.blip(m === 'drone' ? 300 : 600, 0.12, 'sawtooth', 0.05);
     };
     this.nav.onChange = () => this.renderCrumbs();
@@ -219,9 +244,18 @@ class App {
 
   async openBinary(path: string) {
     this.mountHud();
+    this.ready = false;
+    this.roomTrail = [];
+    this.plans.clear();
+    this.pendingRoomPlans.clear();
+    this.roomSummaries.clear();
+    this.entranceStrings.clear();
+    this.world.clearRoom();
+    this.world.stopWalking();
+    this.hud.setWalkHint('');
+    this.roomMapSidebar.show(null);
     if (this.world.view !== 'city') await this.world.backToCity();
     this.sock?.close();
-    this.ready = false;
     this.info = null;
     this.seek = null;
     this.walk = [];
@@ -273,7 +307,7 @@ class App {
       audio.setMood('city');
       this.hud.setStats({ functions: m.functions.filter((f) => !f.imp).length, 'call sites': m.calls.length, 'string refs': m.strRefs.length });
       this.hud.setView('CITY // ADDRESS SPACE');
-      this.hud.caption('// ONLINE', `${m.functions.length} functions · ${m.calls.length} call sites · click a tower`);
+      this.hud.caption('// ONLINE', `${m.functions.length} functions · ${m.calls.length} call sites · G to walk the city`);
       this.ready = true;
       if (m.seek !== null) this.setSeekUi(m.seek);
       this.nav.push({ view: 'city', fi: null, addr: null });
@@ -323,7 +357,7 @@ class App {
   }
 
   /** Select a function in the city: focus its call graph, open it in the Inspector. */
-  select(fi: number, o: { fly?: boolean; addr?: number; push?: boolean } = {}) {
+  select(fi: number, o: { fly?: boolean; addr?: number; push?: boolean; inspect?: boolean } = {}) {
     const m = this.model;
     if (!m) return;
     this.sel = fi;
@@ -333,7 +367,9 @@ class App {
       this.hud.setDepth(this.depth);
       const t = this.world.city?.towerOfFn(fi);
       if (o.fly !== false) {
-        if (t) this.world.focusTower(t, 1.8, o.addr);
+        if (this.world.rig.mode === 'walk') {
+          if (t) this.world.startStreet(t);
+        } else if (t) this.world.focusTower(t, 1.8, o.addr);
         else {
           const sp = this.world.sats?.posOfFn(fi);
           if (sp) this.world.flyTo(sp.clone().add(new THREE.Vector3(30, 25, 30)), sp, 1.8);
@@ -343,7 +379,7 @@ class App {
     }
     this.setSeekUi(addr);
     this.syncR2(addr);
-    this.inspector.show(fi, addr);
+    this.inspector.show(fi, addr, o.inspect ?? this.world.rig.mode !== 'walk');
     if (o.push !== false) this.nav.push({ view: this.world.view, fi, addr: o.addr ?? null });
   }
 
@@ -351,7 +387,7 @@ class App {
   // Every view change runs in one exclusive lane: input arriving while a warp or a
   // graph fetch is in flight is rejected (with a soft blip) instead of half-applying
   // and leaving the HUD, history and world out of sync.
-  private navBusy = false;
+  private navTask: Promise<void> | null = null;
 
   /** current view, re-read after awaits (TS would otherwise keep a stale narrowing) */
   private viewNow(): string {
@@ -359,7 +395,7 @@ class App {
   }
 
   private get busy() {
-    return this.navBusy || this.world.transitioning;
+    return this.navTask !== null || this.world.transitioning;
   }
 
   private async exclusive(fn: () => Promise<void>) {
@@ -367,18 +403,286 @@ class App {
       audio.blip(180, 0.04, 'square', 0.02);
       return false;
     }
-    this.navBusy = true;
+    const task = Promise.resolve().then(fn);
+    this.navTask = task;
     try {
-      await fn();
+      await task;
     } finally {
-      this.navBusy = false;
+      this.navTask = null;
     }
     return true;
+  }
+
+  private updateCameraCenter() {
+    const w = this.world;
+    w.engine.setCenterShift(w.rig.mode !== 'walk' && !w.roomMap && this.inspector.isOpen && window.innerWidth > 900 ? 250 : 0);
+  }
+
+  private walkHint(tower: Tower | null, aimed?: RoomExit) {
+    const w = this.world;
+    document.body.classList.toggle('room-map-open', w.roomMap);
+    this.roomMapSidebar.show(w.view === 'interior' ? w.room : null);
+    if (w.roomMap && w.room) {
+      const selected = w.func?.selectedBlock;
+      const location = w.inCorridor
+        ? `In corridor · ${hex(w.room.block.addr)} → ${w.corridorDestination === undefined ? 'Street' : hex(w.corridorDestination)}`
+        : `You are here · Floor ${w.room.floor} · ${hex(w.room.block.addr)}`;
+      this.hud.setWalkHint(location,
+        selected && selected !== w.room.block ? `M / Enter visit ${hex(selected.addr)} · Esc cancel`
+          : 'Click a block to visit · M / Esc returns');
+      return;
+    }
+    if (w.inCorridor) {
+      const direction = w.corridorDirection;
+      this.hud.setWalkHint(direction > 0 ? '↑ TOWARD DESTINATION' : direction < 0 ? '↓ BACK TOWARD SOURCE' : 'BRANCH CORRIDOR',
+        'Cyan arrows point to destination · W / S move · M map');
+      return;
+    }
+    if (w.view === 'interior' && w.room) {
+      const room = w.room;
+      const route = room.selectedExit ?? aimed;
+      const call = room.selectedCall ?? w.aimedRoomCall();
+      const controls = [
+        '← → choose exit · E travel', 'M map', 'Backspace back', 'X street',
+        room.zeroGravity ? 'Space / Q rise / descend' : '',
+        room.calls.length ? 'Aim at a call or cycle with Tab · Space teleport' : '',
+        room.pageCount > 1 ? `[ ] summaries ${room.summaryPage}/${room.pageCount}` : '',
+      ].filter(Boolean).join(' · ');
+      const title = call
+        ? `Call ${room.calls.indexOf(call) + 1}/${room.calls.length} · ${call.text}${call.callee === undefined ? ' · destination unavailable' : ' · Space teleport'}`
+        : route ? `${route.label} · ${route.endpoint}`
+          : `Floor ${room.floor} · ${room.block === room.plan.entry ? 'Entry point' : 'Basic block'} · ${hex(room.block.addr)}`;
+      this.hud.setWalkHint(title, controls);
+      return;
+    }
+    this.hud.setWalkHint(w.rig.mode === 'walk' ? (tower ? `Enter ${tower.fn.name}` : 'Follow the lit entrances at street level') : '',
+      'Look up for function strings · walk through or press E nearby · G orbit');
+  }
+
+  private toggleWalking() {
+    const w = this.world;
+    if (this.busy || w.engine.presenting || w.view !== 'city') return;
+    if (w.rig.mode === 'walk') {
+      w.stopWalking(true);
+      this.walkHint(null);
+      return;
+    }
+    const entries = this.info?.entries ?? [];
+    const fi = this.sel ?? (entries.length ? this.model?.fnAt(entries[0].vaddr) : undefined);
+    const tower = (fi === undefined ? null : w.city?.towerOfFn(fi)) ?? w.city?.towers[0];
+    if (!tower) return;
+    this.inspector.toggle(false, false);
+    w.startStreet(tower, true);
+    this.walkHint(w.nearEntrance());
+  }
+
+  private enterTower(tower: Tower, quick = false) {
+    if (!this.ready || this.world.view !== 'city' || this.world.rig.mode !== 'walk') return;
+    void this.exclusive(() => this.openRoom(tower.fnIndex, undefined, quick ? 'quick' : 'door'));
+  }
+
+  private readRoomSummary(sock: R2Client, addr: number): Promise<string> {
+    const cached = this.roomSummaries.get(addr);
+    if (cached) return cached;
+    const pending = sock.blockSummary(addr).catch(() => {
+      if (this.roomSummaries.get(addr) === pending) this.roomSummaries.delete(addr);
+      return '';
+    });
+    this.roomSummaries.set(addr, pending);
+    if (this.roomSummaries.size > 128) this.roomSummaries.delete(this.roomSummaries.keys().next().value!);
+    return pending;
+  }
+
+  private getRoomPlan(sock: R2Client, fi: number, addr: number): Promise<InteriorPlan | null> {
+    const cached = this.plans.get(fi);
+    if (cached) return Promise.resolve(cached);
+    const running = this.pendingRoomPlans.get(fi);
+    if (running) return running;
+    const pending = sock.fn(addr).then((graph) => {
+      if (!graph?.blocks?.length || this.sock !== sock || !this.ready) return null;
+      const tower = this.world.city?.towerOfFn(fi);
+      const street = tower && this.world.city?.streetPosition(tower);
+      const plan = new InteriorPlan(fi, graph, tower && street ? { x: street.x, z: street.z, width: tower.width } : undefined);
+      this.plans.set(fi, plan);
+      return plan;
+    }).finally(() => {
+      if (this.pendingRoomPlans.get(fi) === pending) this.pendingRoomPlans.delete(fi);
+    });
+    this.pendingRoomPlans.set(fi, pending);
+    return pending;
+  }
+
+  private async previewTower(tower: Tower) {
+    const sock = this.sock;
+    const model = this.model;
+    if (!sock || !model || !this.ready) return;
+    const plan = await this.getRoomPlan(sock, tower.fnIndex, tower.fn.addr).catch(() => null);
+    if (!plan || this.sock !== sock || !this.world.showEntranceVista(tower, plan, model, (addr) => this.readRoomSummary(sock, addr))) return;
+    const summary = await this.readRoomSummary(sock, plan.entry.addr);
+    if (this.sock === sock) this.world.updateEntranceSummary(tower, summary);
+  }
+
+  private async previewStrings(tower: Tower) {
+    const sock = this.sock;
+    const model = this.model;
+    if (!sock || !model || !this.ready) return;
+    let strings = this.entranceStrings.get(tower.fnIndex);
+    if (!strings) {
+      strings = sock.functionSummary(tower.fn.addr).catch(() => '').then((summary) => functionStrings(summary, model, tower.fnIndex));
+      this.entranceStrings.set(tower.fnIndex, strings);
+      if (this.entranceStrings.size > 48) this.entranceStrings.delete(this.entranceStrings.keys().next().value!);
+    }
+    const values = await strings;
+    if (this.sock === sock) this.world.updateEntranceStrings(tower, values);
+  }
+
+  private async openRoom(fi: number, addr: number | undefined, motion: RoomMotion, exit?: RoomExit, history: 'push' | 'back' | 'restore' = 'push', arrival?: RoomArrival) {
+    const m = this.model;
+    const sock = this.sock;
+    const w = this.world;
+    if (!m || !sock || m.fns[fi]?.imp || !m.fns[fi]) return;
+    const from = w.room;
+    const trail = from ? [...this.roomTrail] : [];
+    if (history === 'push' && from) trail.push({
+      fi: from.plan.fi, addr: from.block.addr, pose: w.cameraFrame(),
+      doorway: exit ? { x: exit.x, y: exit.y, z: exit.z, nx: exit.nx, nz: exit.nz, radius: exit.radius } : undefined,
+      slide: exit?.slide,
+    });
+    if (history === 'back') trail.pop();
+    w.rig.walkBlocked = true;
+    try {
+      if (!this.plans.has(fi)) this.hud.setWalkHint(`Opening ${m.fns[fi].name}…`);
+      const plan = await this.getRoomPlan(sock, fi, m.fns[fi].addr);
+      if (this.sock !== sock || !this.ready) return;
+      if (!plan) {
+        this.hud.caption('// NO BASIC BLOCKS', m.fns[fi].name);
+        return;
+      }
+      const block = (addr === undefined ? undefined : plan.blockAt(addr)) ?? plan.entry;
+      const walking = motion === 'door' || motion === 'lift' || motion === 'slide';
+      const summaryPending = this.readRoomSummary(sock, block.addr);
+      const summary = walking ? '' : await summaryPending;
+      if (this.sock !== sock || !this.ready || w.room !== from) return;
+      const back = trail.at(-1);
+      const backPlan = back ? this.plans.get(back.fi) : undefined;
+      const backBlock = back && backPlan?.blockAt(back.addr);
+      const entrance = walking && !from && block === plan.entry ? w.entranceRoom(plan) : null;
+      const room = entrance ?? new BlockRoom(plan, block, m, summary, backPlan && backBlock ? {
+        plan: backPlan, block: backBlock, doorway: back?.doorway, slide: back?.slide,
+      } : null,
+        (addr) => this.readRoomSummary(sock, addr));
+      await w.enterRoom(room, motion, exit, arrival);
+      if (w.room !== room || this.sock !== sock) return;
+      if (walking) void summaryPending.then((text) => {
+        if (w.room === room && this.sock === sock) room.setSummary(text);
+      });
+      this.roomTrail = trail;
+      this.sel = fi;
+      this.hud.setView(`BUILDING // FLOOR ${room.floor}`);
+      this.hud.setDepth(null);
+      this.updateCameraCenter();
+      this.inspector.show(fi, block.addr, false);
+      this.setSeekUi(block.addr);
+      this.syncR2(block.addr);
+      if (history !== 'restore') this.nav.push({ view: 'interior', fi, addr: block.addr });
+    } catch (e) {
+      audio.error();
+      this.hud.caption('// ROOM UNAVAILABLE', (e as Error).message);
+    } finally {
+      w.rig.walkBlocked = false;
+      this.walkHint(w.view === 'city' ? w.nearEntrance() : null);
+    }
+  }
+
+  private takeRoomExit(exit: RoomExit, quick = false) {
+    const room = this.world.room;
+    if (!room || this.world.view !== 'interior') return;
+    if (!exit.edge) return this.backRoom(quick ? undefined : exit);
+    const motion = quick ? 'quick' : exit.slide ? 'slide' : exit.elevator ? 'lift' : 'door';
+    void this.exclusive(() => this.openRoom(room.plan.fi, exit.edge!.to, motion, exit));
+  }
+
+  private backRoom(exit?: RoomExit) {
+    const w = this.world;
+    if (this.busy) return;
+    if (w.roomMap) return this.toggleRoomMap();
+    const back = this.roomTrail.at(-1);
+    if (!back) return this.leaveBuilding(exit);
+    const backDoor = exit ?? w.room?.exits.find((door) => !door.edge);
+    const lift = exit && backDoor?.elevator;
+    const motion = lift ? 'lift' : exit ? 'door' : back.fi === w.room?.plan.fi ? 'quick' : 'warp';
+    void this.exclusive(() => this.openRoom(back.fi, back.addr, motion, lift ? backDoor : exit, 'back', back));
+  }
+
+  private leaveBuilding(exit?: RoomExit) {
+    const w = this.world;
+    const tower = w.room && w.city?.towerOfFn(w.room.plan.fi);
+    if (!tower || this.busy) return;
+    void this.exclusive(async () => {
+      if (!await w.exitToStreet(tower, exit)) return;
+      this.roomTrail = [];
+      this.hud.setView('CITY // ADDRESS SPACE');
+      this.select(tower.fnIndex, { fly: false, inspect: false });
+      this.walkHint(w.nearEntrance());
+    });
+  }
+
+  private async followRoomCall(fi: number) {
+    if (!this.model?.fns[fi].imp) return this.openRoom(fi, undefined, 'warp');
+    if (!await this.world.walkToImport(fi)) return;
+    this.roomTrail = [];
+    this.hud.setView('CITY // ADDRESS SPACE');
+    this.select(fi, { fly: false, inspect: false });
+    this.walkHint(null);
+  }
+
+  private async toggleRoomMap(visitSelected = true) {
+    const w = this.world;
+    if (!w.room) return;
+    if (w.roomMap) {
+      const selected = visitSelected ? w.func?.selectedBlock : undefined;
+      const room = w.room;
+      w.closeRoomMap();
+      this.hud.setView(`BUILDING // FLOOR ${room.floor}`);
+      this.walkHint(null);
+      if (selected && selected.addr !== room.block.addr) {
+        if (w.inCorridor) {
+          const walking = this.navTask;
+          w.cancelCorridor();
+          await walking;
+        }
+        await this.exclusive(() => this.openRoom(room.plan.fi, selected.addr, 'quick'));
+      }
+      return;
+    }
+    const showMap = async () => {
+      w.rig.walkBlocked = true;
+      try {
+        await w.openRoomMap();
+        if (w.roomMap) this.hud.setView('BUILDING MAP // CONTROL FLOW');
+      } finally {
+        w.rig.walkBlocked = false;
+        this.walkHint(null);
+      }
+    };
+    if (w.inCorridor) {
+      if (!w.rig.walkBlocked) await showMap();
+    } else await this.exclusive(showMap);
+  }
+
+  private clearInteriorNavigation() {
+    this.roomTrail = [];
+    this.world.clearRoom();
+    this.hud.setWalkHint('');
+    document.body.classList.remove('room-map-open');
+    this.roomMapSidebar.show(null);
+    this.updateCameraCenter();
   }
 
   /** Open a function from a reference (Inspector, palette…) staying in the current view type. */
   openFn(fi: number, site?: number) {
     const v = this.world.view;
+    if (v === 'interior') return void this.exclusive(() => this.openRoom(fi, site, 'warp'));
     if (v === 'function') return void this.openCore(fi, site);
     if (v === 'constellation') return void this.exclusive(() => this.recenterTo(fi, true));
     this.select(fi, { addr: site });
@@ -422,7 +726,7 @@ class App {
       this.hud.caption('// IMPORT', `${m.fns[fi].name} lives outside this binary`);
       return audio.error();
     }
-    if (this.world.view === 'function' && this.world.func?.graph.addr === m.fns[fi].addr) {
+    if (!this.world.roomMap && this.world.view === 'function' && this.world.func?.graph.addr === m.fns[fi].addr) {
       if (site !== undefined) this.goto(site);
       return;
     }
@@ -432,6 +736,7 @@ class App {
       this.hud.caption('// NO GRAPH', `nothing to render at ${hex(m.fns[fi].addr)}`);
       return;
     }
+    this.clearInteriorNavigation();
     await this.world.enterFunction(g, site);
     if (this.viewNow() !== 'function' || this.world.func?.graph.addr !== g.addr) return;
     this.sel = fi;
@@ -448,6 +753,7 @@ class App {
   private async doOpenGraph(fi: number, push = true) {
     if (!this.model) return;
     if (this.world.view === 'constellation') return this.recenterTo(fi, push);
+    this.clearInteriorNavigation();
     await this.world.enterConstellation(fi);
     if (this.viewNow() !== 'constellation') return;
     this.sel = fi;
@@ -461,7 +767,12 @@ class App {
   }
 
   private async doToCity(push = true) {
-    if (this.world.view === 'city') return;
+    if (this.world.view === 'city') {
+      this.world.stopWalking(true);
+      this.walkHint(null);
+      return;
+    }
+    this.clearInteriorNavigation();
     await this.world.backToCity();
     if (this.viewNow() !== 'city') return;
     this.hud.setView('CITY // ADDRESS SPACE');
@@ -479,12 +790,25 @@ class App {
     if (!m) return;
     const fi = m.fnAt(addr);
     const w = this.world;
+    if (w.view === 'interior' && w.room) {
+      if (fi < 0) return;
+      if (w.room.plan.fi === fi && w.room.plan.blockAt(addr) === w.room.block) {
+        this.setSeekUi(addr);
+        if (!fromR2) this.syncR2(addr);
+        return;
+      }
+      return void this.exclusive(() => this.openRoom(fi, addr, fi === w.room?.plan.fi ? 'quick' : 'warp'));
+    }
     if (w.view === 'function' && w.func) {
       const p = w.func.panelAt(addr);
       if (p) {
         w.func.setSeek(addr);
         const f = w.func.frameOf(p);
         w.flyTo(f.pos, f.target, 1.1);
+        if (w.roomMap) {
+          this.walkHint(null);
+          return;
+        }
         this.setSeekUi(addr);
         if (!fromR2) this.syncR2(addr);
         this.nav.push({ view: 'function', fi, addr });
@@ -507,6 +831,7 @@ class App {
 
   private travel(x: number, z: number) {
     const w = this.world;
+    if (w.rig.mode === 'walk') return;
     const cam = w.engine.camera.position;
     if (w.rig.mode === 'drone') {
       w.flyTo(new THREE.Vector3(x, Math.max(cam.y, 30), z + 20), new THREE.Vector3(x, 10, z), 1.4);
@@ -531,6 +856,8 @@ class App {
     } else if (e.view === 'function' && e.fi !== null) {
       await this.doOpenCore(e.fi, e.addr ?? undefined, false);
       if (e.addr !== null && this.world.view === 'function') this.seekInCore(e.addr);
+    } else if (e.view === 'interior' && e.fi !== null) {
+      await this.openRoom(e.fi, e.addr ?? undefined, 'warp', undefined, 'restore');
     }
   }
 
@@ -566,7 +893,7 @@ class App {
     const m = this.model;
     this.hud.setCrumbs(
       this.nav.trail(5).map(({ e, current }) => ({
-        label: (e.view === 'city' ? '◌ ' : e.view === 'constellation' ? '✶ ' : '◈ ') + (e.fi !== null && m ? m.fns[e.fi].name.replace(/^sym\./, '') : 'city'),
+        label: (e.view === 'city' ? '◌ ' : e.view === 'constellation' ? '✶ ' : e.view === 'interior' ? '▥ ' : '◈ ') + (e.fi !== null && m ? m.fns[e.fi].name.replace(/^sym\./, '') : 'city'),
         current,
         onClick: () => {
           if (this.busy || current) return;
@@ -858,10 +1185,78 @@ class App {
 
   // ---------------------------------------------------------------- keys
   private toggleDrone() {
-    if (this.world.view !== 'city' && this.world.rig.mode === 'orbit') {
-      // drone works everywhere, but warn that collisions are city-only
-    }
+    if (this.world.room || this.busy) return;
+    if (this.world.rig.mode === 'walk') this.world.stopWalking();
     this.world.rig.setMode(this.world.rig.mode === 'drone' ? 'orbit' : 'drone');
+    this.walkHint(null);
+  }
+
+  private onWalkKey(e: KeyboardEvent) {
+    const w = this.world;
+    const k = e.key.toLowerCase();
+    if (w.roomMap) {
+      if (k === 'm' || k === 'enter' || k === 'escape' || k === 'backspace') {
+        e.preventDefault();
+        if ((!this.busy || w.inCorridor) && !e.repeat) void this.toggleRoomMap(k === 'm' || k === 'enter');
+        return true;
+      }
+      if (k === 'x') {
+        if (!e.repeat) this.leaveBuilding();
+        return true;
+      }
+      if (k.startsWith('arrow') || k === 'f') return true;
+      return false;
+    }
+    if (w.rig.mode !== 'walk') return false;
+    if (k === 'arrowup' || k === 'arrowdown' || (e.shiftKey && (k === 'arrowleft' || k === 'arrowright'))) return true;
+    const room = w.room;
+    if (w.inCorridor && (k === 'm' || k === ' ')) {
+      e.preventDefault();
+      if (k === 'm' && !e.repeat) void this.toggleRoomMap();
+      return true;
+    }
+    if (k === 'escape') {
+      if (!w.rig.locked && !this.busy && !room) this.toggleWalking();
+      return true;
+    }
+    if (k === 'e' || k === 'enter') {
+      e.preventDefault();
+      if (this.busy || e.repeat) return true;
+      if (room) {
+        const exit = room.selectedExit ?? w.aimedRoomExit();
+        if (exit) this.takeRoomExit(exit, true);
+      } else {
+        const tower = w.nearEntrance();
+        if (tower) this.enterTower(tower, true);
+      }
+      return true;
+    }
+    if (k === 'g' && !room) {
+      if (!e.repeat) this.toggleWalking();
+      return true;
+    }
+    if (!room) return false;
+    if (k === ' ' || k === 'r') {
+      const callee = (room.selectedCall ?? w.aimedRoomCall())?.callee;
+      if (callee !== undefined) {
+        e.preventDefault();
+        if (!this.busy && !e.repeat) void this.exclusive(() => this.followRoomCall(callee));
+        return true;
+      }
+    }
+    if (['m', 'backspace', 'x', 'tab', 'arrowleft', 'arrowright', '[', ']'].includes(k)) {
+      e.preventDefault();
+      if (this.busy || (e.repeat && !k.startsWith('arrow'))) return true;
+      if (k === 'm') void this.toggleRoomMap();
+      if (k === 'backspace') this.backRoom();
+      if (k === 'x') this.leaveBuilding();
+      if (k === 'tab') room.cycleCall(e.shiftKey ? -1 : 1);
+      if (k === 'arrowleft' || k === 'arrowright') room.cycleExit(k === 'arrowleft' ? -1 : 1);
+      if (k === '[' || k === ']') room.pageSummary(k === '[' ? -1 : 1);
+      if (!this.busy) this.walkHint(null, w.aimedRoomExit());
+      return true;
+    }
+    return false;
   }
 
   private toggleHelp() {
@@ -907,8 +1302,9 @@ class App {
     const k = e.key;
     if (k === '/') return (e.preventDefault(), this.palette.open());
     if (k === '?') return this.toggleHelp();
+    if (k === 'Escape' && this.helpEl) return this.toggleHelp();
+    if (this.onWalkKey(e)) return;
     if (k === 'Escape') {
-      if (this.helpEl) return this.toggleHelp();
       if (drone && !w.rig.locked) return w.rig.setMode('orbit');
       if (w.view !== 'city') return void this.toCity();
       if (this.sel !== null) {
@@ -919,6 +1315,7 @@ class App {
       }
       return;
     }
+    if (k.toLowerCase() === 'g' && !e.repeat) return this.toggleWalking();
     if (k === 'f' || k === 'F') return this.toggleDrone();
     if (drone && 'wasdqeWASDQE '.includes(k)) return; // flight keys belong to the rig
     if (k === 'Backspace') return (e.preventDefault(), this.back());
@@ -933,6 +1330,10 @@ class App {
     }
     if (k === 'Enter') {
       const fi = this.sel ?? (this.seek !== null ? this.model?.fnAt(this.seek) ?? -1 : -1);
+      if (fi !== null && fi >= 0 && w.view === 'function' && w.func?.selectedBlock && !w.engine.presenting) {
+        const addr = w.func.selectedBlock.addr;
+        return void this.exclusive(() => this.openRoom(fi, addr, 'warp'));
+      }
       if (fi !== null && fi >= 0 && w.view !== 'function') return void this.openCore(fi);
       return;
     }

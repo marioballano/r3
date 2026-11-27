@@ -7,6 +7,7 @@ export class Minimap {
   private cv: HTMLCanvasElement;
   private base: HTMLCanvasElement | null = null;
   private extent = 200;
+  private spacing = 0;
   private label: HTMLElement;
   onTravel: (x: number, z: number) => void = () => {};
 
@@ -34,7 +35,10 @@ export class Minimap {
   rebuild() {
     const city = this.world.city;
     if (!city) return;
-    const R = (this.world.sats?.radius ?? city.radius + 140) + 20;
+    this.spacing = city.spacing;
+    const sats = this.world.sats;
+    const satScale = sats?.group.scale.x ?? 1;
+    const R = (sats ? sats.radius * satScale : city.radius + 44) + 20;
     this.extent = R;
     const S = 220;
     const c = document.createElement('canvas');
@@ -50,7 +54,8 @@ export class Minimap {
       g.arc(S / 2, S / 2, (i / 6) * S * 0.5, 0, Math.PI * 2);
       g.stroke();
     }
-    const halo = this.world.halo?.radius;
+    const layer = this.world.halo;
+    const halo = layer ? layer.radius * layer.group.scale.x : null;
     if (halo) {
       g.strokeStyle = 'rgba(255,43,214,0.55)';
       g.lineWidth = 2;
@@ -67,7 +72,7 @@ export class Minimap {
     g.globalAlpha = 1;
     for (const s of this.world.sats?.sats ?? []) {
       g.fillStyle = '#7af7ff';
-      g.fillRect(px(s.pos.x) - 1, px(s.pos.z) - 1, 2, 2);
+      g.fillRect(px(s.pos.x * satScale) - 1, px(s.pos.z * satScale) - 1, 2, 2);
     }
     this.base = c;
   }
@@ -77,6 +82,7 @@ export class Minimap {
     const visible = w.view === 'city' && !!this.base && !w.isPlaceholder;
     this.el.classList.toggle('hidden', !visible);
     if (!visible) return;
+    if (w.city && w.city.spacing !== this.spacing) this.rebuild();
     const S = 220;
     const g = this.cv.getContext('2d')!;
     g.clearRect(0, 0, S, S);
@@ -115,6 +121,6 @@ export class Minimap {
     g.beginPath();
     g.arc(cx, cz, 3, 0, Math.PI * 2);
     g.fill();
-    this.label.textContent = w.rig.mode === 'drone' ? 'RADAR · DRONE' : 'RADAR';
+    this.label.textContent = w.rig.mode === 'drone' ? 'RADAR · DRONE' : w.rig.mode === 'walk' ? 'RADAR · ON FOOT' : 'RADAR';
   }
 }

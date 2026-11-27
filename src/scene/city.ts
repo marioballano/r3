@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { FOG_PARS, NOISE, globals, heat } from '../shaders/common';
 import type { Fn } from '../types';
 import { LabelField } from './labels';
+import { STREET_ARCH } from './doorway';
 
 /** Hilbert curve index -> (x, y) on an n x n grid (n power of two). */
 function d2xy(n: number, d: number): [number, number] {
@@ -26,6 +27,7 @@ function d2xy(n: number, d: number): [number, number] {
 }
 
 export const CELL = 7;
+export const WALK_CELL = 11;
 
 export interface Tower {
   fn: Fn;
@@ -43,12 +45,15 @@ export class City {
   material: THREE.ShaderMaterial;
   towers: Tower[] = [];
   radius = 60;
+  footprintRadius = 0;
+  spacing = CELL;
   labels: LabelField | null = null;
   private aHi: THREE.InstancedBufferAttribute;
   private aRole: THREE.InstancedBufferAttribute;
   /** fn index -> tower index */
   byFn = new Map<number, number>();
   private sorted: Tower[];
+  private cells: [number, number][];
   private sweepT = -1;
   private growT = 0;
   pillar: THREE.Mesh | null = null;
@@ -72,9 +77,9 @@ export class City {
     return pts.map(([x, y]) => [x - cx, y - cy]);
   }
 
-  static radiusFor(functions: Fn[]): number {
+  static radiusFor(functions: Fn[], minimum = 60): number {
     const pts = City.layout(functions.filter((f) => !f.imp).length);
-    let r = 60;
+    let r = minimum;
     for (const [x, y] of pts) r = Math.max(r, Math.hypot(x, y) * CELL + CELL);
     return r;
   }
@@ -96,17 +101,18 @@ export class City {
       }
       return ccSorted.length > 1 ? lo / (ccSorted.length - 1) : 0;
     };
-    const cells = City.layout(this.towers.length);
+    const cells = this.cells = City.layout(this.towers.length);
     this.towers.forEach((t, i) => {
       t.pos.set(cells[i][0] * CELL, 0, cells[i][1] * CELL);
       const sz = Math.max(4, t.fn.size);
       t.height = Math.min(150, 2 + Math.sqrt(sz) * 0.42);
       t.width = Math.min(CELL * 0.8, 1.6 + Math.log2(1 + t.fn.nbbs) * 0.5);
       heat(Math.pow(pct(t.fn.cc), 2.2) * (t.fn.cc > 1 ? 1 : 0.3), t.color);
-      this.radius = Math.max(this.radius, t.pos.length() + CELL);
+      this.footprintRadius = Math.max(this.footprintRadius, t.pos.length() + CELL);
       this.maxHeight = Math.max(this.maxHeight, t.height);
     });
     this.sorted = [...this.towers];
+    this.radius = Math.max(60, this.footprintRadius);
 
     const geo = new THREE.BoxGeometry(1, 1, 1);
     geo.translate(0, 0.5, 0);
@@ -132,14 +138,19 @@ export class City {
     this.towers.forEach((t, i) => this.byFn.set(t.fnIndex, i));
 
     this.material = new THREE.ShaderMaterial({
+      clipping: true,
       uniforms: {
         ...globals,
         uGrow: { value: 0 },
         uSweep: { value: 0 },
         uCityR: { value: this.radius },
         uFocus: { value: 0 },
+        uStreetLevel: { value: 0 },
+        uOpenDoor: { value: new THREE.Vector3() },
+        uDoorOpen: { value: 0 },
       },
       vertexShader: /* glsl */ `
+        #include <clipping_planes_pars_vertex>
         uniform float uGrow;
         attribute vec3 aColor;
         attribute vec3 aSize;
@@ -171,17 +182,22 @@ export class City {
           vSeed = aSeed.x;
           vec4 w = modelMatrix * instanceMatrix * vec4(p, 1.0);
           vWorld = w.xyz;
-          vec4 mv = viewMatrix * w;
-          vDist = -mv.z / length(viewMatrix[0].xyz); // world units, also under a scaled XR rig
-          gl_Position = projectionMatrix * mv;
+          vec4 mvPosition = viewMatrix * w;
+          vDist = -mvPosition.z / length(viewMatrix[0].xyz); // world units, also under a scaled XR rig
+          gl_Position = projectionMatrix * mvPosition;
+          #include <clipping_planes_vertex>
         }`,
       fragmentShader: /* glsl */ `
+        #include <clipping_planes_pars_fragment>
         ${NOISE}
         ${FOG_PARS}
         uniform float uTime;
         uniform float uSweep;
         uniform float uCityR;
         uniform float uFocus;
+        uniform float uStreetLevel;
+        uniform float uDoorOpen;
+        uniform vec3 uOpenDoor;
         varying vec3 vLocal;
         varying vec3 vN;
         varying vec3 vSize;
@@ -247,7 +263,19 @@ export class City {
 
           // materialisation shimmer while growing
           col += tint * (1.0 - vGrow) * 2.0 * step(0.5, h21(vec2(floor(y * 3.0), floor(uTime * 20.0))));
+          float street = uStreetLevel * (1.0 - smoothstep(4.0, 24.0, y));
+          col = mix(col, col / (1.0 + col * 4.0) + vec3(0.035, 0.043, 0.065), street);
 
+          #include <clipping_planes_fragment>
+          if (uDoorOpen > 0.5 && vWorld.z <= uOpenDoor.z + 0.035) {
+            float rayZ = vWorld.z - cameraPosition.z;
+            if (rayZ < -0.001) {
+              float t = (uOpenDoor.z - cameraPosition.z) / rayZ;
+              vec3 opening = mix(cameraPosition, vWorld, t);
+              vec2 arch = vec2(opening.x - uOpenDoor.x, max(0.0, opening.y - ${(STREET_ARCH.height - STREET_ARCH.halfWidth).toFixed(2)}));
+              if (opening.y > 0.0 && dot(arch, arch) < ${STREET_ARCH.halfWidth ** 2}) discard;
+            }
+          }
           col = applyFog(col, vDist);
           gl_FragColor = vec4(col, 1.0);
         }`,
@@ -319,6 +347,41 @@ export class City {
     pillar.position.set(t.pos.x, t.height, t.pos.z);
     this.pillar = pillar;
     this.group.add(pillar);
+  }
+
+  setStreetLevel(on: boolean) {
+    this.material.uniforms.uStreetLevel.value = Number(on);
+    if (this.pillar) this.pillar.visible = !on;
+    if (this.labels) this.labels.mesh.visible = !on;
+  }
+
+  setOpenDoor(tower: Tower | null) {
+    const u = this.material.uniforms;
+    u.uDoorOpen.value = Number(!!tower);
+    if (tower) u.uOpenDoor.value.set(tower.pos.x, 0, tower.pos.z + tower.width / 2);
+  }
+
+  setSpacing(spacing: number) {
+    if (spacing === this.spacing) return false;
+    this.spacing = spacing;
+    this.footprintRadius = 0;
+    const m = new THREE.Matrix4();
+    this.towers.forEach((t, i) => {
+      const [x, z] = this.cells[i];
+      t.pos.set(x * spacing, 0, z * spacing);
+      this.mesh.setMatrixAt(i, m.makeScale(t.width, t.height, t.width).setPosition(t.pos));
+      this.footprintRadius = Math.max(this.footprintRadius, t.pos.length() + spacing);
+    });
+    this.radius = Math.max(60, this.footprintRadius);
+    this.mesh.instanceMatrix.needsUpdate = true;
+    this.mesh.computeBoundingSphere();
+    this.mesh.computeBoundingBox();
+    this.material.uniforms.uCityR.value = this.radius;
+    return true;
+  }
+
+  streetPosition(tower: Tower) {
+    return tower.pos.clone().multiplyScalar(WALK_CELL / this.spacing);
   }
 
   /** Tower containing (or nearest below) a virtual address. */

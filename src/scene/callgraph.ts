@@ -45,6 +45,7 @@ export class CityArcs {
     const t = new Float32Array(nv);
     const col = new Float32Array(nv * 3);
     const seed = new Float32Array(nv);
+    const rings = new Float32Array(nv);
     const ca = new THREE.Color();
     const p = new THREE.Vector3();
     let v = 0;
@@ -62,6 +63,8 @@ export class CityArcs {
       const c1 = model.fns[pr.callee]?.imp ? IMPORT_COL : CALLEE_COL;
       const s = Math.random();
       const w = Math.min(1, 0.45 + Math.log2(1 + pr.sites.length) * 0.25);
+      const sourceRing = Number(!!model.fns[pr.caller]?.imp);
+      const targetRing = Number(!!model.fns[pr.callee]?.imp);
       for (let i = 0; i < SEG; i++) {
         for (const k of [i, i + 1]) {
           const u = k / SEG;
@@ -71,6 +74,7 @@ export class CityArcs {
           ca.copy(c0).lerp(c1, u).multiplyScalar(w);
           col.set([ca.r, ca.g, ca.b], v * 3);
           seed[v] = s;
+          rings[v] = THREE.MathUtils.lerp(sourceRing, targetRing, u);
           v++;
         }
       }
@@ -80,23 +84,27 @@ export class CityArcs {
     geo.setAttribute('aT', new THREE.BufferAttribute(t.subarray(0, v), 1));
     geo.setAttribute('aColor', new THREE.BufferAttribute(col.subarray(0, v * 3), 3));
     geo.setAttribute('aSeed', new THREE.BufferAttribute(seed.subarray(0, v), 1));
+    geo.setAttribute('aRing', new THREE.BufferAttribute(rings.subarray(0, v), 1));
     const dense = this.pairs.length > 3000;
     this.material = new THREE.ShaderMaterial({
       transparent: true,
       depthWrite: false,
       blending: THREE.AdditiveBlending,
-      uniforms: { ...globals, uBase: { value: dense ? 0.035 : 0.07 }, uDim: { value: 0 }, uReveal: { value: 1 } },
+      uniforms: { ...globals, uBase: { value: dense ? 0.035 : 0.07 }, uDim: { value: 0 }, uReveal: { value: 1 }, uLayout: { value: new THREE.Vector2(1, 1) } },
       vertexShader: /* glsl */ `
         attribute float aT;
         attribute vec3 aColor;
         attribute float aSeed;
+        attribute float aRing;
+        uniform vec2 uLayout;
         varying float vT;
         varying vec3 vColor;
         varying float vSeed;
         varying float vDist;
         void main() {
           vT = aT; vColor = aColor; vSeed = aSeed;
-          vec4 mv = modelViewMatrix * vec4(position, 1.0);
+          float scale = mix(uLayout.x, uLayout.y, aRing);
+          vec4 mv = modelViewMatrix * vec4(position.x * scale, position.y, position.z * scale, 1.0);
           vDist = -mv.z / length(viewMatrix[0].xyz); // world units, also under a scaled XR rig
           gl_Position = projectionMatrix * mv;
         }`,
@@ -126,6 +134,10 @@ export class CityArcs {
 
   setDim(v: number) {
     this.material.uniforms.uDim.value = v;
+  }
+
+  setLayoutScale(towers: number, imports: number) {
+    this.material.uniforms.uLayout.value.set(towers, imports);
   }
 
   dispose() {

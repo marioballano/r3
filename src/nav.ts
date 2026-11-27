@@ -1,6 +1,6 @@
 // Browser-style navigation history across views.
 export interface NavEntry {
-  view: 'city' | 'constellation' | 'function';
+  view: 'city' | 'constellation' | 'function' | 'interior';
   fi: number | null;
   addr: number | null;
 }

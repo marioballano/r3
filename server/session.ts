@@ -41,6 +41,8 @@ export class Session {
       case 'cmd': return this.send({ ...await r2.cmd(msg.cmd, msg.cols), id: msg.id });
       case 'query': return this.send({ t: 'query', id: msg.id, data: await r2.query(msg.cmd) });
       case 'fn': return this.send({ t: 'fn', id: msg.id, graph: await r2.fn(msg.addr) });
+      case 'block-summary': return this.send({ t: 'block-summary', id: msg.id, text: await r2.blockSummary(msg.addr) });
+      case 'function-summary': return this.send({ t: 'function-summary', id: msg.id, text: await r2.functionSummary(msg.addr) });
       case 'inspect': return this.send({ t: 'inspect', id: msg.id, ...await r2.inspect(msg.addr) });
       case 'pdc': return this.send({ t: 'pdc', id: msg.id, text: await r2.pdc(msg.addr) });
     }

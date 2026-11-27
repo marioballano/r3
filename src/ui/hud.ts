@@ -18,6 +18,7 @@ export class Hud {
   private mute = h('span', { class: 'mute' });
   private modeEl = h('div', { class: 'mode' }, 'ORBIT');
   private cross = h('div', { class: 'crosshair hidden' });
+  private walkStatus = h('div', { class: 'walk-status hidden' }, h('strong'), h('span'));
   private crumbs = h('div', { class: 'crumbs' });
   private depthEl = h('div', { class: 'depth hidden' });
   private entropy: EntropyData | null = null;
@@ -43,6 +44,7 @@ export class Hud {
       h('div', { class: 'tr' }, this.seekEl, this.fname, this.viewEl, this.modeEl, this.depthEl),
       this.crumbs,
       this.cross,
+      this.walkStatus,
       this.stats,
       this.log,
       this.cap,
@@ -58,6 +60,8 @@ export class Hud {
           'search ',
           h('kbd', {}, 'F'),
           'drone ',
+          h('kbd', {}, 'G'),
+          'walk ',
           h('kbd', {}, 'C'),
           'graph ',
           h('kbd', {}, '⏎'),
@@ -140,9 +144,17 @@ export class Hud {
   }
 
   setMode(mode: string) {
-    this.modeEl.textContent = mode === 'drone' ? '◉ DRONE · WASD QE ⇧ · RMB/lock look' : '○ ORBIT';
+    this.modeEl.textContent = mode === 'drone' ? '◉ DRONE · WASD QE ⇧ · mouse look'
+      : mode === 'walk' ? '◉ ON FOOT · WASD · ⇧ WASD/arrows sprint · Space jump' : '○ ORBIT';
     this.modeEl.classList.toggle('drone', mode === 'drone');
-    this.cross.classList.toggle('hidden', mode !== 'drone');
+    this.modeEl.classList.toggle('on-foot', mode === 'walk');
+    this.cross.classList.toggle('hidden', mode === 'orbit');
+  }
+
+  setWalkHint(title: string, controls = '') {
+    this.walkStatus.classList.toggle('hidden', !title);
+    if (this.walkStatus.firstElementChild!.textContent !== title) this.walkStatus.firstElementChild!.textContent = title;
+    if (this.walkStatus.lastElementChild!.textContent !== controls) this.walkStatus.lastElementChild!.textContent = controls;
   }
 
   setDepth(d: number | null) {

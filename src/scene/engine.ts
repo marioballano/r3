@@ -112,6 +112,7 @@ export class Engine {
   private clock = new THREE.Clock();
   time = 0;
   private lastInput = performance.now();
+  private readingView = false;
   private frameTimes: number[] = [];
   quality = 2; // 2 high, 1 medium, 0 low
   autoQuality = true;
@@ -162,6 +163,18 @@ export class Engine {
     this.controls.autoRotate = false;
   }
 
+  setReadingView(reading: boolean) {
+    this.readingView = reading;
+    if (reading) {
+      this.cyber.u('uGlitch').value = 0;
+      this.cyber.u('uFlash').value = 0;
+    }
+    this.cyber.u('uAberration').value = reading ? 0 : 0.006;
+    this.cyber.u('uGrain').value = reading ? 0.008 : 0.045;
+    this.cyber.u('uScan').value = reading ? 0.055 : 0.12;
+    this.cyber.u('uVignette').value = reading ? 0.50 : 0.85;
+  }
+
   get idleSeconds() {
     return (performance.now() - this.lastInput) / 1000;
   }
@@ -176,6 +189,7 @@ export class Engine {
 
   /** Shift the projection centre left by `px` (keeps the subject clear of a docked panel). */
   setCenterShift(px: number) {
+    if (this.centerShift === px) return;
     this.centerShift = px;
     const o = this.shiftTween;
     const start = o.v;
@@ -224,11 +238,11 @@ export class Engine {
   /** Brief glitch burst; `amount` 0..1. */
   glitch(amount = 0.6, duration = 0.35) {
     const u = this.cyber.u('uGlitch');
-    u.value = Math.max(u.value as number, amount);
+    u.value = Math.max(u.value as number, amount * (this.readingView ? 0.13 : 1));
     const start = this.time;
     const off = this.add(() => {
       const k = 1 - (this.time - start) / duration;
-      u.value = Math.max(0, amount * k);
+      u.value = Math.max(0, amount * k * (this.readingView ? 0.13 : 1));
       if (k <= 0) off();
     });
   }
@@ -238,7 +252,7 @@ export class Engine {
     const start = this.time;
     const off = this.add(() => {
       const k = 1 - (this.time - start) / duration;
-      u.value = Math.max(0, amount * k * k);
+      u.value = Math.max(0, amount * k * k) * (this.readingView ? 0.16 : 1);
       if (k <= 0) off();
     });
   }

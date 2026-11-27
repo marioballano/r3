@@ -3,6 +3,8 @@ import { FOG_PARS, globals, PALETTE } from '../shaders/common';
 import type { Fn, ImportEntry, StringEntry } from '../types';
 import { LabelField } from './labels';
 
+export const IMPORT_GAP = 26;
+
 export interface Satellite {
   name: string;
   fnIndex: number | null;
@@ -20,7 +22,7 @@ export class ImportRing {
   radius: number;
 
   constructor(imports: ImportEntry[], functions: Fn[], innerRadius: number) {
-    this.radius = innerRadius + 80;
+    this.radius = innerRadius + IMPORT_GAP;
     const fnByName = new Map<string, number>();
     functions.forEach((f, i) => {
       if (f.imp) fnByName.set(f.name.replace(/^sym\.imp\./, '').replace(/^imp\./, ''), i);
@@ -140,7 +142,7 @@ export class ImportRing {
   }
 
   posOfFn(fnIndex: number): THREE.Vector3 | null {
-    return this.byFn.get(fnIndex)?.pos ?? null;
+    return this.byFn.get(fnIndex)?.pos.clone().multiply(this.group.scale) ?? null;
   }
 
   satOfFn(fnIndex: number): number {
